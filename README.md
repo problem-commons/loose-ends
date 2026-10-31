@@ -1228,6 +1228,55 @@ before the agent starts. On Windows, the launcher explicitly restores the
 elevated sandbox implementation so `workspace-write` remains effective even
 though user configuration is ignored.
 
+## Choosing the agent: Codex or Claude Code
+
+Every model-backed command accepts `--agent codex` (the default) or
+`--agent claude` to run its turns in
+[Claude Code](https://code.claude.com/docs/en/overview) instead of Codex.
+Commands with a composed critic also accept `--review-agent`, so a solver and
+its critic can come from different vendors:
+
+```sh
+python src/solve_open_problems.py papers/edemaine --from-triage attempt \
+  --agent codex --review-agent claude --review-model opus
+```
+
+The workbench offers the same choice as **Agent** and **Critic agent** under
+**Model and web-search settings**.
+
+The Claude Code agent follows the same contract as Codex: it receives the same
+prompt and staged read-only inputs, writes `agent-result.json`, and runs
+`python -m validation.validate` before finishing; the host revalidates as
+usual. Each turn runs `claude -p` non-interactively with:
+
+* shell commands in Claude Code's
+  [sandbox](https://code.claude.com/docs/en/sandboxing) (writes limited to the
+  workspace and temporary directory, no shell network access, no fallback to
+  unsandboxed commands; the run fails if the sandbox is unavailable);
+* only the Bash, Read, Edit, and Write tools, plus WebSearch (`indexed`) or
+  WebSearch and WebFetch (`live`) where the stage allows web search;
+* no MCP servers, skills, slash commands, or subagents, no saved session, and
+  only `local` settings (override with `LOOSE_ENDS_CLAUDE_SETTING_SOURCES`).
+
+Requirements and differences:
+
+* Claude Code's sandbox runs on macOS, Linux, and WSL2, not natively on
+  Windows. On Windows, run Loose Ends inside WSL2 and install `bubblewrap` and
+  `socat` there. Log in with `claude` once before running tasks.
+* `LOOSE_ENDS_CLAUDE` selects a specific Claude Code executable.
+* Without `--model`, Claude Code's own default model is used; aliases such as
+  `opus` or full model names work. Reasoning effort maps to Claude Code's
+  `--effort`, with `ultra` mapped to `max`. Fast and Ultrafast tiers are
+  Codex-only.
+* A critic that switches agents does not inherit the primary model.
+* The agent is part of each configuration digest, so switching agents
+  re-runs work instead of reusing results. Codex digests are unchanged.
+  Manifests of non-Codex runs record `requested_agent` and `agent_version`.
+* Usage tracking records Claude Code tokens; its cost estimate shows as
+  unknown because the price table covers OpenAI models only. The Codex CLI
+  must currently still be installed, because commands query its version at
+  startup.
+
 ## Development
 
 Code lives in `src/` and tests live in `test/`. With Node.js 22+ and pnpm

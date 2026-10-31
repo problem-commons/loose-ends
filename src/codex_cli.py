@@ -27,6 +27,35 @@ REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 WEB_SEARCH_MODES = ("disabled", "indexed", "live")
 DEFAULT_MODEL = "gpt-6-astra"
 DEFAULT_REASONING_EFFORT = "xhigh"
+# Agent CLIs that can perform a structured turn.  Codex is the default and the
+# reference implementation; Claude Code is an alternative backend that follows
+# the same workspace, prompt, and in-turn validation contract.
+AGENTS = ("codex", "claude")
+DEFAULT_AGENT = "codex"
+CLAUDE_EXECUTABLE_ENV = "LOOSE_ENDS_CLAUDE"
+CLAUDE_SETTING_SOURCES_ENV = "LOOSE_ENDS_CLAUDE_SETTING_SOURCES"
+# Claude Code has no separate "ultra" level; map it to the deepest one.
+CLAUDE_EFFORTS = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+    "ultra": "max",
+}
+# Mirror the Codex restrictions: shell commands run in Claude Code's OS-level
+# sandbox (writes limited to the workspace and temporary directory), with no
+# shell network access and no fallback to unsandboxed execution.  Web access,
+# when a stage allows it, goes only through the WebSearch/WebFetch tools.
+CLAUDE_SANDBOX_SETTINGS = {
+    "sandbox": {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "autoAllowBashIfSandboxed": True,
+        "allowUnsandboxedCommands": False,
+        "network": {"allowedDomains": [], "strictAllowlist": True},
+    },
+}
 DEFAULT_VALIDATION_PROMPT_PATH = (
     Path(__file__).resolve().parent.parent / "prompts" / "validate-output.md"
 )
@@ -106,14 +135,27 @@ class ModelOptions:
     reasoning_effort: str | None = None
     fast: bool = False
     ultrafast: bool = False
+    # None means "not chosen here": the default agent for primary runs, or the
+    # primary run's agent for composed critics.
+    agent: str | None = None
 
     def __post_init__(self):
         if self.fast and self.ultrafast:
             raise ValueError("Fast and Ultrafast are mutually exclusive")
+        if self.agent is not None and self.agent not in AGENTS:
+            raise ValueError(
+                "agent must be one of " + ", ".join(AGENTS)
+            )
+        if self.agent_name != "codex" and (self.fast or self.ultrafast):
+            raise ValueError("Fast and Ultrafast service tiers are Codex-only")
 
     @property
     def service_tier(self) -> str:
         return "ultrafast" if self.ultrafast else "fast" if self.fast else "standard"
+
+    @property
+    def agent_name(self) -> str:
+        return self.agent or DEFAULT_AGENT
 
 
 @dataclass(frozen=True)
@@ -257,13 +299,26 @@ def add_model_arguments(
         "inherit the primary run" if prefix else primary_reasoning_default
     )
     parser.add_argument(
+        f"--{option_prefix}agent",
+        dest=f"{destination_prefix}agent",
+        default=None if prefix else DEFAULT_AGENT,
+        choices=AGENTS,
+        metavar="AGENT",
+        help=(
+            "agent CLI that performs the turn: codex or claude (Claude Code; "
+            "requires Linux, macOS, or WSL2 for its sandbox) "
+            f"(default: {'inherit the primary run' if prefix else DEFAULT_AGENT})"
+        ),
+    )
+    parser.add_argument(
         f"--{option_prefix}model",
         dest=f"{destination_prefix}model",
         default=model_default,
         metavar="MODEL",
         help=(
-            "Codex model ID; for example, gpt-5.6-sol "
-            f"(default: {model_default_help})"
+            "model ID; for example, gpt-5.6-sol for Codex or opus for Claude "
+            f"Code (default: {model_default_help}; with --{option_prefix}agent "
+            "claude, the Claude Code default model)"
         ),
     )
     parser.add_argument(
@@ -330,14 +385,61 @@ def model_options_from_args(
     prefix: str = "",
 ) -> ModelOptions:
     destination_prefix = f"{prefix.replace('-', '_')}_" if prefix else ""
+    agent = getattr(args, f"{destination_prefix}agent", None)
+    model = getattr(args, f"{destination_prefix}model")
+    fast = getattr(args, f"{destination_prefix}fast")
+    ultrafast = getattr(args, f"{destination_prefix}ultrafast", False)
+    if agent is not None and agent != "codex":
+        if model == DEFAULT_MODEL:
+            # The parser's default model is a Codex model; let Claude Code
+            # use its own default unless a model was requested explicitly.
+            model = None
+        if fast or ultrafast:
+            raise CodexError(
+                f"--{prefix + '-' if prefix else ''}fast and "
+                f"--{prefix + '-' if prefix else ''}ultrafast are Codex-only "
+                f"and cannot be combined with --{prefix + '-' if prefix else ''}"
+                f"agent {agent}"
+            )
     return ModelOptions(
-        model=getattr(args, f"{destination_prefix}model"),
+        model=model,
         reasoning_effort=getattr(
             args,
             f"{destination_prefix}reasoning_effort",
         ),
-        fast=getattr(args, f"{destination_prefix}fast"),
-        ultrafast=getattr(args, f"{destination_prefix}ultrafast", False),
+        fast=fast,
+        ultrafast=ultrafast,
+        agent=agent,
+    )
+
+
+def inherit_model_options(
+    primary: ModelOptions,
+    secondary: ModelOptions,
+) -> ModelOptions:
+    """Fill unset composed-critic options from the primary run.
+
+    A critic that switches agents does not inherit the primary model, which
+    belongs to the other agent's model namespace, nor Codex service tiers.
+    """
+    agent = secondary.agent or primary.agent
+    same_agent = (agent or DEFAULT_AGENT) == primary.agent_name
+    if secondary.model:
+        model = secondary.model
+    elif same_agent:
+        model = primary.model
+    else:
+        model = DEFAULT_MODEL if (agent or DEFAULT_AGENT) == "codex" else None
+    fast = secondary.fast or (primary.fast and not secondary.ultrafast)
+    ultrafast = secondary.ultrafast or (primary.ultrafast and not secondary.fast)
+    if (agent or DEFAULT_AGENT) != "codex":
+        fast = ultrafast = False
+    return ModelOptions(
+        model,
+        secondary.reasoning_effort or primary.reasoning_effort,
+        fast,
+        ultrafast,
+        agent,
     )
 
 
@@ -358,6 +460,9 @@ def semantic_config_digest(
     }
     if options.ultrafast:
         payload["ultrafast"] = True
+    # Preserve existing Codex digests; another agent is a different config.
+    if options.agent_name != DEFAULT_AGENT:
+        payload["agent"] = options.agent_name
     # Preserve existing disabled-search digests for analysis and triage.
     if web_search != "disabled":
         payload["web_search"] = web_search
@@ -965,8 +1070,13 @@ def _run_codex_process(
     result_path: Path,
     timeout_seconds: float | None,
     completion_grace_seconds: float | None,
+    turn_complete: Callable[[Path, Path], bool] | None = None,
 ) -> tuple[subprocess.CompletedProcess, bool, bool]:
     """Run Codex while detecting completed turns with lingering tools."""
+    if turn_complete is None:
+        # Look up at call time so tests can patch the module attribute.
+        def turn_complete(events: Path, result: Path) -> bool:
+            return structured_turn_is_complete(events, result)
     popen_options: dict = {
         "cwd": workspace,
         "env": environment,
@@ -997,7 +1107,7 @@ def _run_codex_process(
     try:
         while process.poll() is None:
             now = time.monotonic()
-            if structured_turn_is_complete(events_path, result_path):
+            if turn_complete(events_path, result_path):
                 if completed_at is None:
                     completed_at = now
                 elif (
@@ -1030,7 +1140,7 @@ def _run_codex_process(
     except BaseException:
         _stop_codex_process(process)
         raise
-    if structured_turn_is_complete(events_path, result_path):
+    if turn_complete(events_path, result_path):
         # Some launchers, notably the Cygwin `codex` shell wrapper, can return
         # a nonzero status after the CLI has already fulfilled the structured
         # output contract.  The validated result and final event are the
@@ -1228,6 +1338,147 @@ def build_exec_command(
     return command
 
 
+def resolve_claude_executable() -> str:
+    """Locate Claude Code, honoring an explicit LOOSE_ENDS_CLAUDE override."""
+    value = os.environ.get(CLAUDE_EXECUTABLE_ENV) or "claude"
+    executable = shutil.which(value)
+    if executable is None:
+        raise CodexError(
+            f"could not find the Claude Code executable {value!r} on PATH; "
+            f"install Claude Code or set {CLAUDE_EXECUTABLE_ENV}"
+        )
+    return executable
+
+
+@lru_cache(maxsize=None)
+def agent_version(agent: str) -> str:
+    """Return the agent CLI version for provenance, or 'unknown'."""
+    try:
+        executable = (
+            resolve_claude_executable()
+            if agent == "claude"
+            else resolve_codex_executable("codex")
+        )
+        return read_codex_version(executable)
+    except CodexError:
+        return "unknown"
+
+
+def agent_provenance(options: ModelOptions) -> dict[str, str]:
+    """Manifest fields for a non-default agent; empty for Codex runs."""
+    if options.agent_name == DEFAULT_AGENT:
+        return {}
+    return {
+        "requested_agent": options.agent_name,
+        "agent_version": agent_version(options.agent_name),
+    }
+
+
+def require_claude_sandbox_host() -> None:
+    """Claude Code's sandbox runs on macOS, Linux, and WSL2 only."""
+    if is_windows_host():
+        raise CodexError(
+            "the Claude Code agent needs a macOS, Linux, or WSL2 host, where "
+            "Claude Code's sandbox is available; run Loose Ends inside WSL2"
+        )
+
+
+def build_claude_command(
+    *,
+    claude: str,
+    options: ModelOptions,
+    web_search: str = "disabled",
+) -> list[str]:
+    """Build a non-interactive, sandboxed Claude Code invocation.
+
+    The prompt is supplied on standard input.  Tools are limited to the shell
+    and file tools, plus web search/fetch where the stage allows it; MCP
+    servers, skills, slash commands, and subagents are unavailable.
+    """
+    if web_search not in WEB_SEARCH_MODES:
+        raise CodexError(
+            "web search must be one of " + ", ".join(WEB_SEARCH_MODES)
+        )
+    tools = ["Bash", "Read", "Edit", "Write"]
+    if web_search in ("indexed", "live"):
+        tools.append("WebSearch")
+    if web_search == "live":
+        tools.append("WebFetch")
+    command = [
+        claude,
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--permission-mode",
+        "acceptEdits",
+        "--permission-prompts",
+        "none",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--setting-sources",
+        os.environ.get(CLAUDE_SETTING_SOURCES_ENV) or "local",
+        "--tools",
+        ",".join(tools),
+        "--settings",
+        json.dumps(CLAUDE_SANDBOX_SETTINGS, separators=(",", ":")),
+    ]
+    if options.model is not None:
+        command.extend(("--model", options.model))
+    if options.reasoning_effort is not None:
+        command.extend(("--effort", CLAUDE_EFFORTS[options.reasoning_effort]))
+    # Deny rules take a variable number of values, so keep them last.
+    command.extend(("--disallowedTools", "mcp__*"))
+    return command
+
+
+def _claude_result_events(events_path: Path):
+    with events_path.open(encoding="utf-8", errors="replace") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("type") == "result":
+                yield event
+
+
+def claude_turn_is_complete(events_path: Path, result_path: Path) -> bool:
+    """Return whether Claude Code finished successfully and left valid JSON."""
+    try:
+        with result_path.open(encoding="utf-8") as source:
+            json.load(source)
+        return any(
+            event.get("subtype") == "success" and not event.get("is_error")
+            for event in _claude_result_events(events_path)
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
+def claude_limit_error(events_path: Path) -> str | None:
+    """Recognize usage-limit or billing failures in Claude Code results."""
+    phrases = (
+        "usage limit",
+        "limit reached",
+        "credit balance is too low",
+        "out of extra usage",
+    )
+    try:
+        for event in _claude_result_events(events_path):
+            if not event.get("is_error"):
+                continue
+            message = str(event.get("result") or event.get("subtype") or "")
+            if any(phrase in message.casefold() for phrase in phrases):
+                return message
+    except (OSError, UnicodeError):
+        return None
+    return None
+
+
 @record_transcript
 def run_structured_codex(
     *,
@@ -1245,26 +1496,55 @@ def run_structured_codex(
     completion_grace_seconds: float | None = None,
     model_writes_result: bool = False,
 ) -> Path:
-    """Run one structured Codex turn and return its final-response path."""
+    """Run one structured agent turn and return its final-response path.
+
+    `codex` is the Codex executable; with `options.agent == "claude"` the
+    turn runs in Claude Code instead, located via LOOSE_ENDS_CLAUDE or PATH.
+    """
     workspace = workspace.resolve()
-    grant_workspace_owner_inheritance(workspace)
-    require_secure_windows_sandbox(codex, workspace)
+    use_claude = options.agent_name == "claude"
+    if use_claude:
+        require_claude_sandbox_host()
+        if not model_writes_result:
+            raise CodexError(
+                "the Claude Code agent requires the model-written result contract"
+            )
+    else:
+        grant_workspace_owner_inheritance(workspace)
+        require_secure_windows_sandbox(codex, workspace)
     result_path = workspace / result_filename
     events_path = workspace / events_filename
     log_path = workspace / log_filename
     events_path.write_text("", encoding="utf-8")
     log_path.write_text("", encoding="utf-8")
-    command = build_exec_command(
-        codex=codex,
-        workspace=workspace,
-        prompt=prompt,
-        schema_path=schema_path,
-        result_path=result_path,
-        options=options,
-        web_search=web_search,
-        model_writes_result=model_writes_result,
-    )
-    environment = codex_subprocess_environment()
+    if use_claude:
+        command = build_claude_command(
+            claude=resolve_claude_executable(),
+            options=options,
+            web_search=web_search,
+        )
+        agent_label = "Claude Code"
+        turn_complete = claude_turn_is_complete
+        limit_error = claude_limit_error
+        environment = os.environ.copy()
+    else:
+        command = build_exec_command(
+            codex=codex,
+            workspace=workspace,
+            prompt=prompt,
+            schema_path=schema_path,
+            result_path=result_path,
+            options=options,
+            web_search=web_search,
+            model_writes_result=model_writes_result,
+        )
+        agent_label = "Codex"
+
+        def turn_complete(events: Path, result: Path) -> bool:
+            return structured_turn_is_complete(events, result)
+
+        limit_error = codex_credit_error
+        environment = codex_subprocess_environment()
 
     completed: subprocess.CompletedProcess | None = None
     structured_result_complete = False
@@ -1278,7 +1558,7 @@ def run_structured_codex(
             ):
                 if attempt > 1:
                     log.write(
-                        f"\n--- Codex startup retry {attempt}/"
+                        f"\n--- {agent_label} startup retry {attempt}/"
                         f"{MAX_CODEX_START_ATTEMPTS} ---\n"
                     )
                     log.flush()
@@ -1313,6 +1593,7 @@ def run_structured_codex(
                         result_path=result_path,
                         timeout_seconds=timeout_seconds,
                         completion_grace_seconds=completion_grace_seconds,
+                        turn_complete=turn_complete,
                     )
         except OSError as exc:
             if (
@@ -1320,14 +1601,14 @@ def run_structured_codex(
                 and getattr(exc, "winerror", None) in {2, 3}
             ):
                 with log_path.open("a", encoding="utf-8") as log:
-                    log.write(f"Codex startup error: {exc}\n")
+                    log.write(f"{agent_label} startup error: {exc}\n")
                 continue
             raise CodexError(
-                f"could not start Codex; workspace preserved at "
+                f"could not start {agent_label}; workspace preserved at "
                 f"{workspace}: {exc}"
             ) from exc
 
-        credit_error = codex_credit_error(events_path)
+        credit_error = limit_error(events_path)
         if credit_error is not None:
             pause_queue_for_credit_error(credit_error)
             break
@@ -1343,22 +1624,24 @@ def run_structured_codex(
         ):
             break
 
-    note_windows_sandbox_failure(log_path)
-    try:
-        normalize_workspace_access(workspace, codex)
-    except CodexError as exc:
-        if not structured_turn_is_complete(events_path, result_path):
-            raise
-        with log_path.open("a", encoding="utf-8") as log:
-            log.write(f"\nDriver ACL recovery warning: {exc}\n")
+    if not use_claude:
+        note_windows_sandbox_failure(log_path)
+        try:
+            normalize_workspace_access(workspace, codex)
+        except CodexError as exc:
+            if not turn_complete(events_path, result_path):
+                raise
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(f"\nDriver ACL recovery warning: {exc}\n")
     if credit_error is not None:
+        noun = "Codex credits" if not use_claude else "Claude Code usage limit"
         raise CodexError(
-            f"Codex credits exhausted: {credit_error}; "
+            f"{noun} exhausted: {credit_error}; "
             f"workspace preserved at {workspace}"
         )
     if timed_out:
         raise CodexError(
-            f"Codex exceeded the {timeout_seconds:g}-second wall-clock "
+            f"{agent_label} exceeded the {timeout_seconds:g}-second wall-clock "
             f"timeout; workspace preserved at {workspace}"
         )
     if (
@@ -1367,7 +1650,7 @@ def run_structured_codex(
     ):
         returncode = completed.returncode if completed is not None else "unknown"
         raise CodexError(
-            f"Codex exited with status {returncode}; "
+            f"{agent_label} exited with status {returncode}; "
             f"workspace preserved at {workspace}"
         )
     return result_path

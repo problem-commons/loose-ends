@@ -37,7 +37,7 @@ TOKEN_FIELDS = (
     "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
     "output_tokens", "reasoning_output_tokens",
 )
-EVENT_RE = re.compile(rb'^\s*\{\s*"type"\s*:\s*"(thread.started|turn.started|turn.completed|turn.failed|error)"')
+EVENT_RE = re.compile(rb'^\s*\{\s*"type"\s*:\s*"(thread.started|turn.started|turn.completed|turn.failed|error|result)"')
 ENTITY_RE = re.compile(r"^(OP-\d+|attempt-\d+|draft-\d+)$")
 
 
@@ -72,6 +72,30 @@ def token_usage(value):
     if result.get("reasoning_output_tokens", 0) > result["output_tokens"]:
         return None
     return result
+
+
+def claude_token_usage(value):
+    """Map a Claude Code result usage block onto the Codex counter shape.
+
+    Claude Code reports uncached input, cache reads, and cache writes
+    separately; Codex input counts include cached reads and writes.
+    """
+    if not isinstance(value, dict):
+        return None
+    counters = ("input_tokens", "cache_read_input_tokens",
+                "cache_creation_input_tokens", "output_tokens")
+    if not all(type(value.get(key, 0)) is int and value.get(key, 0) >= 0 for key in counters):
+        return None
+    if type(value.get("input_tokens")) is not int or type(value.get("output_tokens")) is not int:
+        return None
+    reads = value.get("cache_read_input_tokens", 0)
+    writes = value.get("cache_creation_input_tokens", 0)
+    return token_usage({
+        "input_tokens": value["input_tokens"] + reads + writes,
+        "cached_input_tokens": reads,
+        "cache_write_input_tokens": writes,
+        "output_tokens": value["output_tokens"],
+    })
 
 
 def model_rates(model, tier):
@@ -428,12 +452,18 @@ class UsageIndex:
                         state = {"thread": event.get("thread_id") or f"source:{key}", "turn": 0}
                         records[f"{state['thread']}:1"] = (None, False)
                         continue
-                    if kind == "turn.started":
+                    if kind in ("turn.started", "result"):
+                        # A Claude Code `result` closes one process turn.
                         state["turn"] = state.get("turn", 0) + 1
                     identity = f"{state.get('thread', 'source:' + key)}:{max(1, state.get('turn', 1))}"
-                    usage = token_usage(event.get("usage")) if kind == "turn.completed" else None
+                    if kind == "result":
+                        usage = claude_token_usage(event.get("usage"))
+                        completed = event.get("subtype") == "success" and not event.get("is_error")
+                    else:
+                        usage = token_usage(event.get("usage")) if kind == "turn.completed" else None
+                        completed = kind == "turn.completed"
                     if identity not in records or usage is not None:
-                        records[identity] = (usage, kind == "turn.completed")
+                        records[identity] = (usage, completed)
                 if not records and not state and stat.st_size:
                     records[f"source:{key}:1"] = (None, False)
                 stream.seek(max(0, offset - 128))

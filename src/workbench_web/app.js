@@ -4992,6 +4992,11 @@ function renderTaskConfiguration(errorMessage = "") {
   modelSettings.append(node("h3", "", "Model and web-search settings"));
   const advancedGrid = node("div", "form-grid");
   const taskDefaults = state.settings.taskDefaults?.[task.action] || {};
+  advancedGrid.append(field("agent", "Agent", {
+    type: "select", value: options.agent || "",
+    options: [["", "Default (Codex)"], ["codex", "Codex"], ["claude", "Claude Code (needs Linux/WSL2)"]],
+    help: "With Claude Code, a blank model uses Claude Code's default model, and the speed tier must stay Standard.",
+  }));
   advancedGrid.append(modelField(
     "model", "Model", options.model, `Default (${taskDefaults.model || "unavailable"})`,
   ));
@@ -5010,6 +5015,11 @@ function renderTaskConfiguration(errorMessage = "") {
     }));
   }
   if (["solve", "write", "revise"].includes(task.action)) {
+    advancedGrid.append(field("reviewAgent", "Critic agent", {
+      type: "select", value: options.reviewAgent || "",
+      options: [["", "Inherit"], ["codex", "Codex"], ["claude", "Claude Code (needs Linux/WSL2)"]],
+      help: "A critic from a different vendor than the solver checks more independently.",
+    }));
     advancedGrid.append(modelField("reviewModel", "Critic model", options.reviewModel, "Inherit primary model"));
     advancedGrid.append(field("reviewReasoningEffort", "Critic reasoning", {
       type: "select", value: options.reviewReasoningEffort || "",

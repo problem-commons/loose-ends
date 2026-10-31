@@ -139,12 +139,13 @@ def analysis_config_digest(
     reasoning_effort: str | None,
     fast: bool,
     ultrafast: bool = False,
+    agent: str | None = None,
 ) -> str:
     """Hash settings that affect the semantic analysis."""
     return codex_cli.semantic_config_digest(
         prompt,
         schema_text,
-        codex_cli.ModelOptions(model, reasoning_effort, fast, ultrafast),
+        codex_cli.ModelOptions(model, reasoning_effort, fast, ultrafast, agent),
         validation_source=Path(analysis_validation.__file__).resolve(),
     )
 
@@ -323,6 +324,7 @@ def build_manifest(
     reasoning_effort: str | None,
     fast: bool,
     ultrafast: bool = False,
+    agent: str | None = None,
 ) -> dict:
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -333,6 +335,7 @@ def build_manifest(
         "requested_fast_mode": fast,
         "requested_service_tier": codex_cli.ModelOptions(fast=fast, ultrafast=ultrafast).service_tier,
         "requested_model": model,
+        **codex_cli.agent_provenance(codex_cli.ModelOptions(agent=agent)),
         "requested_reasoning_effort": reasoning_effort,
         "status": agent_result["status"],
         "paper_title": agent_result["paper_title"],
@@ -405,6 +408,7 @@ def analyze_paper(
     reasoning_effort: str | None = None,
     fast: bool = False,
     ultrafast: bool = False,
+    agent: str | None = None,
     force: bool = False,
     launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> AnalysisOutcome:
@@ -421,6 +425,7 @@ def analyze_paper(
         reasoning_effort,
         fast,
         ultrafast,
+        agent,
     )
     if not force and analysis_is_current(
         analysis_directory,
@@ -459,6 +464,7 @@ def analyze_paper(
             reasoning_effort,
             fast,
             ultrafast,
+            agent,
         ),
         launch_interval=launch_interval,
     )
@@ -476,6 +482,7 @@ def analyze_paper(
             reasoning_effort=reasoning_effort,
             fast=fast,
             ultrafast=ultrafast,
+            agent=agent,
         )
         staged_manifest = workspace / MANIFEST_FILE
         staged_manifest.write_text(
@@ -726,8 +733,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         schema_text = schema_path.read_text(encoding="utf-8")
         json.loads(schema_text)
+        options = codex_cli.model_options_from_args(args)
     except (
         AnalysisError,
+        codex_cli.CodexError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,
@@ -761,10 +770,11 @@ def main(argv: list[str] | None = None) -> int:
         config_digest = analysis_config_digest(
             prompt_template,
             schema_text,
-            args.model,
-            args.reasoning_effort,
-            args.fast,
-            args.ultrafast,
+            options.model,
+            options.reasoning_effort,
+            options.fast,
+            options.ultrafast,
+            options.agent,
         )
         for paper in papers:
             try:
@@ -841,10 +851,11 @@ def main(argv: list[str] | None = None) -> int:
                     prompt_template=prompt_template,
                     schema_path=schema_path,
                     schema_text=schema_text,
-                    model=args.model,
-                    reasoning_effort=args.reasoning_effort,
-                    fast=args.fast,
-                    ultrafast=args.ultrafast,
+                    model=options.model,
+                    reasoning_effort=options.reasoning_effort,
+                    fast=options.fast,
+                    ultrafast=options.ultrafast,
+                    agent=options.agent,
                     force=args.force,
                 ): paper
                 for paper in papers

@@ -1628,6 +1628,7 @@ def _install_draft(
                 "config_digest": config_digest,
                 "codex_version": codex_version,
                 "requested_model": options.model,
+                **codex_cli.agent_provenance(options),
                 "requested_reasoning_effort": options.reasoning_effort,
                 "requested_fast_mode": options.fast,
                 "requested_service_tier": options.service_tier,
@@ -1963,6 +1964,7 @@ def run_paper_review(
                     "config_digest": config_digest,
                     "codex_version": codex_version,
                     "requested_model": options.model,
+                    **codex_cli.agent_provenance(options),
                     "requested_reasoning_effort": options.reasoning_effort,
                     "requested_fast_mode": options.fast,
                     "requested_service_tier": options.service_tier,
@@ -2134,12 +2136,7 @@ def _inherit_options(
     primary: codex_cli.ModelOptions,
     secondary: codex_cli.ModelOptions,
 ) -> codex_cli.ModelOptions:
-    return codex_cli.ModelOptions(
-        secondary.model or primary.model,
-        secondary.reasoning_effort or primary.reasoning_effort,
-        secondary.fast or (primary.fast and not secondary.ultrafast),
-        secondary.ultrafast or (primary.ultrafast and not secondary.fast),
-    )
+    return codex_cli.inherit_model_options(primary, secondary)
 
 
 def _load_draft(path: Path) -> DraftRef:
