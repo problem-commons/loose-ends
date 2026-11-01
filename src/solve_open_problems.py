@@ -1309,6 +1309,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         input_paths, direct_exact = common.direct_problem_inputs(args.paths)
+        # Paper paths need a selection (--from-triage, ...), which direct
+        # PAPER/OP-ID paths exclude; one command cannot do both.
+        common.reject_mixed_inputs(args.paths, "solving")
         if direct_exact and (
             args.from_triage is not None
             or args.problem_ids

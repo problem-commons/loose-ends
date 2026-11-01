@@ -845,6 +845,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         input_paths, direct_exact = common.direct_problem_inputs(args.paths)
+        # Paper paths select by triage class while PAPER/OP-ID paths bypass
+        # it; one command cannot do both.
+        common.reject_mixed_inputs(args.paths, "the literature review")
         if direct_exact and (
             args.from_triage is not None
             or args.problem_ids

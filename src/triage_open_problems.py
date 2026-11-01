@@ -549,7 +549,11 @@ def main(argv: list[str] | None = None) -> int:
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
             explicitness=explicitness,
         )
-        problems = common.filter_exact_problems(problems, direct_exact)
+        # Paper or folder paths next to PAPER/OP-ID paths add all their
+        # problems instead of being silently dropped.
+        problems = common.filter_exact_problems(
+            problems, direct_exact, common.whole_paper_inputs(args.paths)
+        )
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")

@@ -600,6 +600,12 @@ python src/triage_open_problems.py papers/edemaine \
   --explicitness explicit
 ```
 
+Paper or folder paths may be combined with `PAPER/OP-ID` paths: triage and
+review then select the union, for example every problem of one paper plus two
+problems of another. Literature search and solving refuse such a mix, because
+paper paths there select by triage class while direct problem paths bypass it;
+run them as two commands.
+
 One Codex turn triages all selected stale problems from the same paper. This is
 substantially cheaper than starting one turn per problem. The Markdown and
 compact structured record are stored at the paper root:

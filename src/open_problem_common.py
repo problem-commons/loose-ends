@@ -102,6 +102,51 @@ def direct_problem_inputs(
     return list(dict.fromkeys(discovery_paths)), selectors
 
 
+def whole_paper_inputs(paths: Sequence[Path]) -> list[Path]:
+    """Return the inputs that are papers or folders, not PAPER/OP-ID paths."""
+    whole: list[Path] = []
+    for raw_path in paths:
+        path = raw_path.expanduser().resolve()
+        if (
+            analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.name)
+            and (path.parent / "analysis" / "manifest.json").is_file()
+        ):
+            continue
+        if (
+            ATTEMPT_DIRECTORY_RE.fullmatch(path.name)
+            and analyze_papers.OPEN_PROBLEM_ID_RE.fullmatch(path.parent.name)
+            and (path.parent.parent / "analysis" / "manifest.json").is_file()
+        ):
+            continue
+        whole.append(path)
+    return whole
+
+
+def within_paths(paper_directory: Path, roots: Iterable[Path]) -> bool:
+    """Return whether a paper is one of `roots` or lies below one."""
+    paper = os.path.normcase(str(paper_directory))
+    for root in roots:
+        prefix = os.path.normcase(str(root))
+        if paper == prefix or paper.startswith(prefix.rstrip("\\/") + os.sep):
+            return True
+    return False
+
+
+def reject_mixed_inputs(paths: Sequence[Path], command: str) -> None:
+    """Refuse paper/folder paths next to PAPER/OP-ID paths.
+
+    Without this, the exact problem paths silently restricted the selection
+    and every problem reached only through a paper or folder path was
+    dropped.
+    """
+    _, exact = direct_problem_inputs(paths)
+    if exact and whole_paper_inputs(paths):
+        raise CodexError(
+            f"{command} cannot mix paper or folder paths with PAPER/OP-ID "
+            "paths in one command; run them as two commands"
+        )
+
+
 def direct_review_inputs(
     paths: Sequence[Path],
 ) -> tuple[
@@ -138,8 +183,13 @@ def direct_review_inputs(
 def filter_exact_problems(
     problems: Iterable[ProblemRef],
     selectors: set[tuple[str, str]],
+    whole_paths: Sequence[Path] = (),
 ) -> list[ProblemRef]:
-    """Restrict discovered problems to exact paper/problem selectors."""
+    """Restrict discovered problems to exact paper/problem selectors.
+
+    Problems of papers named by `whole_paths` (paper or folder inputs given
+    next to the exact paths) stay selected as well.
+    """
     if not selectors:
         return list(problems)
     selected = [
@@ -149,12 +199,13 @@ def filter_exact_problems(
             os.path.normcase(str(problem.paper_directory)),
             problem.id,
         ) in selectors
+        or within_paths(problem.paper_directory, whole_paths)
     ]
-    if len(selected) != len(selectors):
-        found = {
-            (os.path.normcase(str(problem.paper_directory)), problem.id)
-            for problem in selected
-        }
+    found = {
+        (os.path.normcase(str(problem.paper_directory)), problem.id)
+        for problem in selected
+    }
+    if not selectors <= found:
         missing = sorted(
             f"{paper}/{problem_id}"
             for paper, problem_id in selectors - found

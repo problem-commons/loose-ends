@@ -929,8 +929,9 @@ def main(argv: list[str] | None = None) -> int:
             input_paths,
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
         )
+        whole_paths = common.whole_paper_inputs(args.paths)
         problems = common.filter_exact_problems(
-            problems, direct_problem_selectors
+            problems, direct_problem_selectors, whole_paths
         )
         attempts = discover_attempt_refs(
             problems,
@@ -958,6 +959,9 @@ def main(argv: list[str] | None = None) -> int:
                         attempt.name,
                     )
                     in exact_attempts
+                    or common.within_paths(
+                        attempt.problem.paper_directory, whole_paths
+                    )
                 )
             ]
             if not attempts:
