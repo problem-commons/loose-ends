@@ -84,6 +84,8 @@ test("renders math in sidebar titles and detail headings, with a plain-text fall
       return element;
     },
     problemTarget() { throw stop; },
+    starButton() { return {}; },
+    labelBadges() { return {}; },
   });
   vm.runInContext(functions, context);
   const title = String.raw`Biconnected partial \(2\)-trees and $K_n$`;

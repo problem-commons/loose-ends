@@ -180,10 +180,97 @@
       priorities: new Set(initialPriorities),
       current: true,
       stale: true,
+      ...createDefaultOrganizeFilters(),
     };
   }
 
+  // Collections, labels and stars (workbench_organize.py) filter problems and
+  // papers alike. Items with a hidden label stay out of view until the viewer
+  // shows hidden items or selects that label.
+  function createDefaultOrganizeFilters() {
+    return { collection: "all", label: "all", starred: false, hidden: false };
+  }
+
+  function labelNames(item) {
+    return (Array.isArray(item.labels) ? item.labels : []).map(label => label.label);
+  }
+
+  function matchesOrganize(item, filters) {
+    const collection = filters.collection || "all";
+    if (collection !== "all" && (item.collection || "") !== collection) return false;
+    const label = filters.label || "all";
+    if (label !== "all" && !labelNames(item).includes(label)) return false;
+    if (filters.starred && !item.starred) return false;
+    if (item.hidden && !filters.hidden) {
+      const selectedHidden = (item.labels || []).some(value => value.hidden && value.label === label);
+      if (!selectedHidden) return false;
+    }
+    return true;
+  }
+
+  function countBy(values) {
+    const counts = new Map();
+    values.forEach(value => counts.set(value, (counts.get(value) || 0) + 1));
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }
+
+  function uniqueRows(items) {
+    const seen = new Map();
+    items.forEach(item => seen.set(item.problemKey || item.key || item.path, item));
+    return [...seen.values()];
+  }
+
+  function collectionOptions(items) {
+    const rows = uniqueRows(items).filter(item => item.collection);
+    return [["all", "All collections"], ...countBy(rows.map(item => item.collection))
+      .map(([name, count]) => [name, `${name} (${count})`])];
+  }
+
+  function labelOptions(items) {
+    const rows = uniqueRows(items);
+    const hidden = new Set(rows.flatMap(item => (item.labels || []).filter(label => label.hidden).map(label => label.label)));
+    return [["all", "Any label"], ...countBy(rows.flatMap(labelNames))
+      .map(([name, count]) => [name, `${name}${hidden.has(name) ? " · hidden" : ""} (${count})`])];
+  }
+
+  function hiddenCount(items) {
+    return uniqueRows(items).filter(item => item.hidden).length;
+  }
+
+  function organizeTags(item) {
+    const tags = [];
+    if (item.starred) tags.push({ dimension: "starred", value: "starred", label: "★", title: "Starred", className: "starred" });
+    (Array.isArray(item.labels) ? item.labels : []).forEach(label => tags.push({
+      dimension: "label",
+      value: label.label,
+      label: label.label,
+      title: `${label.hidden ? "Hidden label" : "Label"}: ${label.label}${label.title ? ` · ${label.title}` : ""}`,
+      className: label.hidden ? "label hidden-label" : "label",
+    }));
+    return tags;
+  }
+
+  function organizeFromSearchParams(filters, parameters) {
+    const collection = parameters.get("collection");
+    const label = parameters.get("label");
+    if (collection) filters.collection = collection;
+    if (label) filters.label = label;
+    filters.starred = parameters.get("starred") === "1";
+    filters.hidden = parameters.get("hidden") === "show";
+    return filters;
+  }
+
+  function organizeToSearchParams(parameters, filters) {
+    ["collection", "label", "starred", "hidden"].forEach(name => parameters.delete(name));
+    if (filters.collection && filters.collection !== "all") parameters.set("collection", filters.collection);
+    if (filters.label && filters.label !== "all") parameters.set("label", filters.label);
+    if (filters.starred) parameters.set("starred", "1");
+    if (filters.hidden) parameters.set("hidden", "show");
+    return parameters;
+  }
+
   function matches(item, filters) {
+    if (!matchesOrganize(item, filters)) return false;
     if (filters.attemptStatus !== "all" && item.attemptStatus !== filters.attemptStatus) return false;
     const triage = filters.triage || "all";
     if (triage === "missing" && item.triageClassification) return false;
@@ -224,6 +311,7 @@
       if (!needle) return true;
       return [
         item.paperTitle, item.paperDirectory, item.paperAuthors,
+        item.collection, ...labelNames(item),
         item.problemId, item.problemTitle, item.problemStatement,
         item.attemptName, item.criticSummary, item.solverSummary,
         item.attemptStatus, item.triageClassification, item.triageSummary,
@@ -235,10 +323,11 @@
   }
 
   function createDefaultPaperFilters() {
-    return { metadata: "all", analysis: "all", problems: "all" };
+    return { metadata: "all", analysis: "all", problems: "all", ...createDefaultOrganizeFilters() };
   }
 
   function matchesPaper(paper, filters) {
+    if (!matchesOrganize(paper, filters)) return false;
     if (filters.metadata === "missing" && paper.metadataComplete) return false;
     if (filters.metadata === "complete" && !paper.metadataComplete) return false;
     if (filters.analysis === "missing" && paper.analyzed) return false;
@@ -256,6 +345,7 @@
       if (!needle) return true;
       return [
         paper.title, paper.name, ...(paper.authors || []), paper.path,
+        paper.collection, ...labelNames(paper),
         paper.arxivId, paper.doi, paper.url, paper.analysisStatus,
       ].join(" ").toLowerCase().includes(needle);
     });
@@ -268,7 +358,7 @@
       const allowed = new Set(paperFilterOptions[key].map(([value]) => value));
       if (requested && allowed.has(requested)) filters[key] = requested;
     });
-    return filters;
+    return organizeFromSearchParams(filters, parameters);
   }
 
   function paperFiltersToSearchParams(parameters, filters) {
@@ -277,7 +367,7 @@
       parameters.delete(parameter);
       if (filters[key] !== defaults[key]) parameters.set(parameter, filters[key]);
     });
-    return parameters;
+    return organizeToSearchParams(parameters, filters);
   }
 
   function createDefaultManuscriptFilters() {
@@ -553,7 +643,8 @@
       values.push(["status", statusLabel(item.attemptStatus)]);
     }
     let legacyShown = false;
-    return values.filter(([, value]) => {
+    const organized = includeProblem ? organizeTags(item) : [];
+    return [...organized, ...values.filter(([, value]) => {
       if (!value) return false;
       if (value !== "legacy") return true;
       if (legacyShown) return false;
@@ -572,7 +663,7 @@
         : dimension === "status" ? `Solution attempt: ${humanize(value)}`
         : `${dimension}: ${humanize(value)}`,
       className: ["claim", "status", "known", "origin"].includes(dimension) ? dimension : "",
-    }));
+    }))];
   }
 
   // Attempts installed by import_attempt.py: made in an interactive session
@@ -736,7 +827,7 @@
       filters.current = values.has("current");
       filters.stale = values.has("stale");
     }
-    return filters;
+    return organizeFromSearchParams(filters, parameters);
   }
 
   function filtersToSearchParams(parameters, filters, initialPriorities = priorityLevels) {
@@ -756,7 +847,7 @@
     if (selectedFreshness.length !== freshnessLevels.length) {
       parameters.set("freshness", selectedFreshness.join(","));
     }
-    return parameters;
+    return organizeToSearchParams(parameters, filters);
   }
 
   function itemIdentity(item) {
@@ -931,6 +1022,11 @@
     groupProblemsByPaper,
     sortPapers,
     attemptTags,
+    organizeTags,
+    collectionOptions,
+    labelOptions,
+    hiddenCount,
+    createDefaultOrganizeFilters,
     detailBadges,
     summaryCards,
     detailTabs,
