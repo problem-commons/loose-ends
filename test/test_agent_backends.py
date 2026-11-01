@@ -112,6 +112,15 @@ class ClaudeCommandTests(unittest.TestCase):
         # Whole tool directories stay readable so shell support keeps working.
         self.assertNotIn("~/.claude", denied_files)
 
+    def test_surrounding_memory_is_not_loaded(self):
+        command = codex_cli.build_claude_command(
+            claude="claude", options=codex_cli.ModelOptions(agent="claude")
+        )
+        settings = json.loads(command[command.index("--settings") + 1])
+        self.assertIs(settings["autoMemoryEnabled"], False)
+        # "project" would load CLAUDE.md files from every parent directory.
+        self.assertEqual(command[command.index("--setting-sources") + 1], "local")
+
     def test_progress_messages_name_the_agent(self):
         self.assertEqual(
             codex_cli.agent_display_name(codex_cli.ModelOptions()), "Codex"

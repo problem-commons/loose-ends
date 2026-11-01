@@ -89,6 +89,10 @@ CLAUDE_SANDBOX_SETTINGS = {
             ],
         },
     },
+    # Auto memory is keyed by git repository and loads whatever
+    # settingSources say; a paper tree inside a repository must not inherit
+    # (or write) memory from interactive sessions there.
+    "autoMemoryEnabled": False,
     "permissions": {
         "deny": [
             *(f"Read({path}/**)" for path in CREDENTIAL_DIRECTORIES),
@@ -1334,6 +1338,10 @@ def build_exec_command(
         "sandbox_workspace_write.network_access=false",
         "--config",
         'windows.sandbox="elevated"',
+        # Workspaces live inside the paper tree, which may sit in a git
+        # repository with its own AGENTS.md; keep those instructions out.
+        "--config",
+        "project_doc_max_bytes=0",
         "--skip-git-repo-check",
         "--sandbox",
         "workspace-write",

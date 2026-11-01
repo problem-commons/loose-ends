@@ -1211,7 +1211,9 @@ repair, and transient startup retry behavior. Batch commands also expose
 concurrency controls.
 Automated Codex runs ignore the invoking user's Codex execution settings and
 explicitly disable MCP/plugin app tools, shell network access, automatic MCP
-dependency installation, and nested agent spawning. Paper analysis and triage
+dependency installation, nested agent spawning, and project `AGENTS.md` files
+(run workspaces sit inside the paper tree, which may belong to a repository
+with its own agent instructions). Paper analysis and triage
 also disable web search; literature, solver, paper writer, and critic runs
 default to live first-party web search, independently of shell network access.
 Saved Codex authentication is still used. With `--ignore-user-config`, the
@@ -1255,8 +1257,10 @@ usual. Each turn runs `claude -p` non-interactively with:
   unsandboxed commands; the run fails if the sandbox is unavailable);
 * only the Bash, Read, Edit, and Write tools, plus WebSearch (`indexed`) or
   WebSearch and WebFetch (`live`) where the stage allows web search;
-* no MCP servers, skills, slash commands, or subagents, no saved session, and
-  only `local` settings (override with `LOOSE_ENDS_CLAUDE_SETTING_SOURCES`);
+* no MCP servers, skills, slash commands, or subagents, no saved session, no
+  auto memory, and only `local` settings (override with
+  `LOOSE_ENDS_CLAUDE_SETTING_SOURCES`), so `CLAUDE.md` files in directories
+  above the paper are not loaded (a `CLAUDE.local.md` there still is);
 * no access to credentials: shell commands cannot read `~/.ssh`, `~/.aws`,
   `~/.gnupg`, `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, Claude Code's
   and Codex's login files, and run without `GITHUB_TOKEN`, `GH_TOKEN`,

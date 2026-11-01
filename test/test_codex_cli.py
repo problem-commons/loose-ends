@@ -103,6 +103,8 @@ name = "Ignored provider"
         self.assertFalse(config["apps"]["_default"]["enabled"])
         self.assertFalse(config["agents"]["enabled"])
         self.assertFalse(config["sandbox_workspace_write"]["network_access"])
+        # A surrounding repository's AGENTS.md must not reach pipeline turns.
+        self.assertEqual(config["project_doc_max_bytes"], 0)
 
     def test_account_config_uses_default_home_and_tracks_account_changes(self):
         default = self.codex_home / ".codex"
