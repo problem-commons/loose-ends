@@ -84,6 +84,20 @@ IGNORED_PREFIXES = (
 )
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
 CATALOG_CACHE_SCHEMA_VERSION = 5
+# File events can be lost (for example when a long solve run's workspace churn
+# overflows the inotify queue), which left results of command-line runs
+# invisible until a restart.  Every so often the catalog therefore compares
+# cheap filesystem signatures and rescans a root only if it changed.
+CATALOG_POLL_ENV = "LOOSE_ENDS_CATALOG_POLL_SECONDS"
+DEFAULT_CATALOG_POLL_SECONDS = 30.0
+
+
+def catalog_poll_seconds() -> float:
+    try:
+        value = float(os.environ.get(CATALOG_POLL_ENV, DEFAULT_CATALOG_POLL_SECONDS))
+    except ValueError:
+        return DEFAULT_CATALOG_POLL_SECONDS
+    return max(value, 0.0)
 ROOT_CACHE_DIRECTORY = ".loose-ends"
 PAPER_CACHE_FILENAME = "workbench-papers.json"
 MANUSCRIPT_CACHE_FILENAME = "workbench-manuscripts.json"
@@ -1125,8 +1139,14 @@ class CatalogManager:
         return self.ready.wait(timeout)
 
     def _refresh_loop(self) -> None:
+        poll = catalog_poll_seconds()
+        last_check = time.monotonic()
         while not self.stopping.is_set():
             if not self.pending.wait(0.5):
+                if poll and time.monotonic() - last_check >= poll:
+                    with self.pending_lock:
+                        self.validate_all = True
+                    self.pending.set()
                 continue
             # Coalesce installation bursts produced by atomic directory moves.
             if self.stopping.wait(0.3):
@@ -1143,6 +1163,7 @@ class CatalogManager:
                 force=force,
                 dirty_roots=None if force or validate_all else dirty_roots,
             )
+            last_check = time.monotonic()
 
     def snapshot(self) -> dict:
         with self.lock:

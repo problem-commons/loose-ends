@@ -1115,7 +1115,11 @@ lightweight filesystem signatures in the background. Only new or changed
 roots are rebuilt, so adding an empty root does not rescan existing roots.
 Cache directories are ignored by both Git and the filesystem watcher. Changes
 to catalog code, prompts, or schemas invalidate the affected caches, and
-unchanged freshness digests are reused within the running server.
+unchanged freshness digests are reused within the running server. Because file
+events can be lost (for example during long command-line runs with heavy
+workspace churn), the server also compares these signatures every 30 seconds
+and rescans a root only when it changed; set
+`LOOSE_ENDS_CATALOG_POLL_SECONDS` to change the interval, or 0 to disable it.
 
 The Papers view has **Add from arXiv** and **Add from files** actions. The file
 importer accepts multiple dragged PDF files, ZIP/tar.gz archives, and/or folders, shows the selected

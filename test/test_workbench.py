@@ -3228,6 +3228,40 @@ class WorkbenchStoreTests(unittest.TestCase):
 
 
 class WorkbenchWatchTests(unittest.TestCase):
+    def test_catalog_notices_new_attempts_without_file_events(self):
+        # No watcher runs here, as if the file events had been lost.
+        with (
+            TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {workbench.CATALOG_POLL_ENV: "0.2"}),
+        ):
+            root = Path(temporary)
+            paper = make_paper(root)
+            (paper / "OP-001").mkdir(exist_ok=True)
+            manager = CatalogManager([root], root / "manuscripts", EventHub())
+            self.addCleanup(manager.close)
+            self.assertTrue(manager.wait_until_ready(8))
+
+            def attempts():
+                return [
+                    row.get("attemptName")
+                    for row in manager.snapshot()["reviews"]
+                    if row.get("attemptName")
+                ]
+
+            self.assertEqual(attempts(), [])
+            staging = paper / "OP-001" / ".attempt-install-test"
+            staging.mkdir()
+            common.write_json(staging / "solver-result.json", {
+                "claimed_result_type": "partial_result", "summary": "Progress.",
+                "checkable_claims": [],
+            })
+            (staging / "attempt.md").write_text("# Attempt", encoding="utf-8")
+            staging.rename(paper / "OP-001" / "attempt-001")
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and not attempts():
+                time.sleep(0.1)
+            self.assertEqual(attempts(), ["attempt-001"])
+
     def test_watchdog_ignores_directory_metadata_changes(self):
         catalog = Mock()
         handler = ChangeHandler(catalog)
