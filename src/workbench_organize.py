@@ -15,15 +15,38 @@ items.  A label with "skip": true also keeps triage, literature search and
 solving away from what it marks, when its file is named in the environment
 variable LOOSE_ENDS_LABELS (os.pathsep-separated; the workbench passes it on to
 its tasks).  Stars are personal and live in the workbench state directory.
+
+A labels file may also declare actions that change the labels, for example
+adding a tag.  The workbench offers them on paper and problem pages only when
+it was started with `--label-command`; it never runs anything named in the
+file itself.  The command receives one JSON object on standard input,
+`{"action", "kind", "target", "values"}`, is expected to change its own
+records and rewrite the labels file, and prints a short message:
+
+    {"id": "tag", "label": "Add tag", "kinds": ["paper", "problem"],
+     "fields": [{"name": "value", "label": "Tag", "required": true,
+                 "suggestions": ["frechet"]}]}
+    {"id": "untag", "label": "Remove tag frechet", "kinds": ["paper"],
+     "target": "own/arXiv-2501.12814", "values": {"value": "frechet"}}
+
+Without "target" an action applies to every paper or problem of its kinds.
+Fields are text (with optional suggestions), textarea or select (options as
+[value, label] pairs), optionally with a starting "value"; "values" are sent
+as given.
+
+Collections, the first directory level below a paper root, are also offered
+as destinations for added papers (`import_targets`).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import threading
 from typing import Iterable, Sequence
@@ -35,6 +58,11 @@ PROBLEM_ID_RE = re.compile(r"^OP-[0-9]{3,}$")
 STARS_FILE = "stars.json"
 MAX_LABEL_LENGTH = 60
 VERSION_RE = re.compile(r"v[0-9]+$")
+ACTION_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+ACTION_KINDS = ("paper", "problem")
+FIELD_TYPES = ("text", "textarea", "select")
+MAX_VALUE_LENGTH = 2000
 
 
 @dataclass(frozen=True)
@@ -49,16 +77,152 @@ class Label:
         return {"label": self.label, "hidden": self.hidden, "title": self.title}
 
 
-def read_labels(path: Path) -> tuple[list[Label], list[str]]:
-    """Labels of one file, and problems with its entries."""
+@dataclass(frozen=True)
+class LabelAction:
+    """A change to the labels that the label command carries out."""
+
+    id: str
+    label: str
+    kinds: tuple[str, ...]
+    target: str = ""
+    title: str = ""
+    fields: tuple = field(default=(), compare=False)  # dicts, as in the file
+    values: tuple = ()  # (name, value) pairs
+
+    @property
+    def key(self) -> str:
+        """Stable identity, so a click never runs an action that has changed."""
+        text = json.dumps(self.describe(with_key=False), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    def describe(self, *, with_key: bool = True) -> dict:
+        value = {
+            "id": self.id, "label": self.label, "title": self.title,
+            "target": self.target, "fields": [dict(item) for item in self.fields],
+            "values": dict(self.values),
+        }
+        if with_key:
+            value["key"] = self.key
+        return value
+
+    def applies_to(self, kind: str, target: str) -> bool:
+        if kind not in self.kinds:
+            return False
+        if not self.target:
+            return True
+        return _strip_version(self.target) == _strip_version(target)
+
+
+def _strip_version(target: str) -> str:
+    """own/arXiv-1234.5v2/OP-001 and own/arXiv-1234.5/OP-001 name the same problem."""
+    head, _, tail = target.rpartition("/")
+    if PROBLEM_ID_RE.match(tail):
+        return f"{VERSION_RE.sub('', head)}/{tail}"
+    return VERSION_RE.sub("", target)
+
+
+def _load_file(path: Path) -> tuple[dict | None, list[str]]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return [], [f"{path}: labels file not found"]
+        return None, [f"{path}: labels file not found"]
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return [], [f"{path}: {exc}"]
+        return None, [f"{path}: {exc}"]
     if not isinstance(value, dict) or value.get("schema_version") != LABELS_SCHEMA_VERSION:
-        return [], [f"{path}: expected schema_version {LABELS_SCHEMA_VERSION}"]
+        return None, [f"{path}: expected schema_version {LABELS_SCHEMA_VERSION}"]
+    return value, []
+
+
+def _read_field(raw: object, where: str) -> tuple[dict | None, str]:
+    if not isinstance(raw, dict):
+        return None, f"{where} is not an object"
+    name, label = raw.get("name"), raw.get("label")
+    if not isinstance(name, str) or not FIELD_NAME_RE.match(name):
+        return None, f"{where} needs a name of lower-case letters, digits and _"
+    if not isinstance(label, str) or not label.strip():
+        return None, f"{where} needs a label"
+    kind = raw.get("type", "text")
+    if kind not in FIELD_TYPES:
+        return None, f"{where}: type must be one of {', '.join(FIELD_TYPES)}"
+    value: dict = {"name": name, "label": label.strip(), "type": kind,
+                   "required": raw.get("required") is True}
+    for key in ("help", "value"):  # value: what the field starts with
+        if isinstance(raw.get(key), str):
+            value[key] = raw[key]
+    if kind == "select":
+        options = raw.get("options")
+        if not isinstance(options, list) or not options or not all(
+            isinstance(option, list) and len(option) == 2
+            and all(isinstance(part, str) for part in option)
+            for option in options
+        ):
+            return None, f"{where}: a select needs options as [value, label] pairs"
+        value["options"] = [list(option) for option in options]
+    suggestions = raw.get("suggestions", [])
+    if isinstance(suggestions, list):
+        value["suggestions"] = [item for item in suggestions if isinstance(item, str)][:200]
+    return value, ""
+
+
+def _read_action(raw: object, where: str) -> tuple[LabelAction | None, list[str]]:
+    if not isinstance(raw, dict):
+        return None, [f"{where} is not an object"]
+    action_id, label = raw.get("id"), raw.get("label")
+    if not isinstance(action_id, str) or not ACTION_ID_RE.match(action_id):
+        return None, [f"{where} needs an id of lower-case letters, digits and -"]
+    if not isinstance(label, str) or not label.strip():
+        return None, [f"{where} needs a label"]
+    kinds = raw.get("kinds", list(ACTION_KINDS))
+    if not isinstance(kinds, list) or not kinds or any(kind not in ACTION_KINDS for kind in kinds):
+        return None, [f"{where}: kinds must be a list of {' and '.join(ACTION_KINDS)}"]
+    target = raw.get("target", "")
+    if not isinstance(target, str):
+        return None, [f"{where}: target must be a string"]
+    values = raw.get("values", {})
+    if not isinstance(values, dict) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in values.items()
+    ):
+        return None, [f"{where}: values must map names to strings"]
+    fields, errors = [], []
+    for index, item in enumerate(raw.get("fields", []) if isinstance(raw.get("fields"), list) else []):
+        parsed, error = _read_field(item, f"{where}.fields[{index}]")
+        if parsed is None:
+            errors.append(error)
+        else:
+            fields.append(parsed)
+    if errors:
+        return None, errors
+    title = raw.get("title", "")
+    return LabelAction(
+        action_id, label.strip()[:MAX_LABEL_LENGTH], tuple(kinds), target.strip("/ "),
+        title if isinstance(title, str) else "",
+        tuple(fields),
+        tuple(sorted(values.items())),
+    ), []
+
+
+def read_actions(path: Path) -> tuple[list[LabelAction], list[str]]:
+    """Label actions of one file, and problems with its entries."""
+    value, errors = _load_file(path)
+    if value is None:
+        return [], errors
+    entries = value.get("actions", [])
+    if not isinstance(entries, list):
+        return [], [f"{path}: actions must be a list"]
+    actions: list[LabelAction] = []
+    for index, entry in enumerate(entries):
+        action, problems = _read_action(entry, f"{path}: actions[{index}]")
+        errors.extend(problems)
+        if action is not None:
+            actions.append(action)
+    return actions, errors
+
+
+def read_labels(path: Path) -> tuple[list[Label], list[str]]:
+    """Labels of one file, and problems with its entries."""
+    value, errors = _load_file(path)
+    if value is None:
+        return [], errors
     entries = value.get("labels")
     if not isinstance(entries, list):
         return [], [f"{path}: labels must be a list"]
@@ -119,6 +283,7 @@ class LabelSource:
         self.paths = [path.expanduser().resolve() for path in paths]
         self.lock = threading.Lock()
         self.labels: list[Label] = []
+        self.actions: list[LabelAction] = []
         self.errors: list[str] = []
         self.signature: tuple | None = None
         self.refresh()
@@ -140,17 +305,36 @@ class LabelSource:
             if signature == self.signature:
                 return False
             labels: list[Label] = []
+            actions: list[LabelAction] = []
             errors: list[str] = []
             for path in self.paths:
                 found, problems = read_labels(path)
                 labels.extend(found)
                 errors.extend(problems)
-            self.labels, self.errors, self.signature = labels, errors, signature
+                if not problems:
+                    declared, problems = read_actions(path)
+                    actions.extend(declared)
+                    errors.extend(problems)
+            self.labels, self.actions = labels, actions
+            self.errors, self.signature = errors, signature
             return True
 
     def current(self) -> list[Label]:
         with self.lock:
             return list(self.labels)
+
+    def current_actions(self) -> list[LabelAction]:
+        with self.lock:
+            return list(self.actions)
+
+    def find_action(self, key: str, kind: str, target: str) -> LabelAction | None:
+        return next(
+            (
+                action for action in self.current_actions()
+                if action.key == key and action.applies_to(kind, target)
+            ),
+            None,
+        )
 
 
 class StarStore:
@@ -223,13 +407,18 @@ def _labels_for(index: dict[str, list[Label]], paper_id: str, problem_id: str = 
     return list(found.values())
 
 
+def _actions_for(actions: Sequence[LabelAction], kind: str, target: str) -> list[dict]:
+    return [action.describe() for action in actions if action.applies_to(kind, target)]
+
+
 def organize(
     value: dict,
     roots: Sequence[Path],
     labels: Iterable[Label],
     stars: dict[str, set[str]],
+    actions: Sequence[LabelAction] = (),
 ) -> dict:
-    """Add collection, labels, hidden and starred to catalog rows, in place."""
+    """Add collection, labels, hidden, starred and label actions to catalog rows."""
     index = _index(labels)
     for paper in value.get("papers", []):
         paper_id, collection = paper_identity(paper.get("path", ""), roots)
@@ -240,15 +429,93 @@ def organize(
             "labels": found,
             "hidden": any(label["hidden"] for label in found),
             "starred": paper.get("key") in stars["papers"],
+            "labelActions": _actions_for(actions, "paper", paper_id),
         })
     for item in value.get("reviews", []):
         paper_id, collection = paper_identity(item.get("paperDirectory", ""), roots)
         found = _labels_for(index, paper_id, item.get("problemId", ""))
+        target = f"{paper_id}/{item.get('problemId', '')}"
         item.update({
             "paperId": paper_id,
             "collection": collection,
             "labels": found,
             "hidden": any(label["hidden"] for label in found),
             "starred": item.get("problemKey") in stars["problems"],
+            "labelActions": _actions_for(actions, "problem", target),
         })
     return value
+
+
+def action_values(action: LabelAction, request: object) -> dict[str, str]:
+    """The values a label action sends: its fixed values and the checked inputs."""
+    if request is None:
+        request = {}
+    # ValueError throughout: these are mistakes in a person's input, not in code.
+    if not isinstance(request, dict):
+        raise ValueError("values must be an object")  # noqa: TRY004
+    values = dict(action.values)
+    for item in action.fields:
+        raw = request.get(item["name"], "")
+        if not isinstance(raw, str):
+            raise ValueError(f"{item['label']} must be text")  # noqa: TRY004
+        raw = raw.strip()
+        if len(raw) > MAX_VALUE_LENGTH:
+            raise ValueError(f"{item['label']} is too long")
+        if item.get("required") and not raw:
+            raise ValueError(f"{item['label']} is required")
+        if item["type"] == "select" and raw not in [option[0] for option in item["options"]]:
+            raise ValueError(f"{item['label']}: choose one of the options")
+        values[item["name"]] = raw
+    return values
+
+
+def run_label_command(
+    command: Sequence[str],
+    action: LabelAction,
+    kind: str,
+    target: str,
+    values: dict[str, str],
+    *,
+    timeout: float = 60,
+) -> str:
+    """Run the label command for one action; return its message."""
+    payload = json.dumps(
+        {"action": action.id, "kind": kind, "target": target, "values": values},
+        ensure_ascii=False,
+    )
+    try:
+        completed = subprocess.run(
+            list(command), input=payload, capture_output=True, text=True,
+            encoding="utf-8", timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"the label command failed: {exc}") from exc
+    output = (completed.stdout or "").strip()
+    if completed.returncode != 0:
+        detail = (completed.stderr or "").strip() or output or f"exit code {completed.returncode}"
+        raise RuntimeError(detail[-2000:])
+    return output[-2000:] or f"{action.label}: done"
+
+
+def import_targets(roots: Iterable[Path]) -> list[Path]:
+    """Where added papers may go: each paper root's collections, then the root."""
+    targets: list[Path] = []
+    for root in roots:
+        try:
+            children = sorted(root.iterdir()) if root.is_dir() else []
+        except OSError:
+            children = []
+        for child in children:
+            if (
+                child.is_dir()
+                and not child.name.startswith((".", "_"))
+                and not _is_paper_directory(child)
+            ):
+                targets.append(child)
+        targets.append(root)
+    return targets
+
+
+def _is_paper_directory(path: Path) -> bool:
+    # As analyze_papers.is_paper_directory, without importing the pipeline.
+    return (path / "paper.pdf").is_file() or (path / "source").exists()

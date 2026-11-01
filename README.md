@@ -1262,6 +1262,36 @@ Large catalogs can be narrowed in the Problem and Paper filters:
 All three are part of the reloadable query string (`collection`, `label`,
 `starred=1`, `hidden=show`).
 
+Added papers (**Add from arXiv**, **Add from files**) go to a collection: the
+**Paper collection** list offers each root's collections first, then the root
+itself. Create a new collection as a directory below the root.
+
+**Changing labels from the workbench.** A labels file may also declare
+actions, such as adding or removing a tag, which a project's own tool carries
+out. The workbench offers them under **Labels…** on paper and problem pages
+when it is started with `--label-command COMMAND`; it never runs a command
+named in a labels file.
+
+```json
+{"schema_version": 1, "labels": [], "actions": [
+  {"id": "tag", "label": "Add tag", "kinds": ["paper", "problem"],
+   "fields": [{"name": "value", "label": "Tag", "required": true,
+               "suggestions": ["spanners"]}]},
+  {"id": "untag", "label": "Remove tag spanners", "kinds": ["paper"],
+   "target": "own/arXiv-2412.06316", "values": {"value": "spanners"}}
+]}
+```
+
+An action without `target` applies to every paper or problem of its `kinds`.
+Fields are `text` (with optional `suggestions`), `textarea`, or `select`
+(with `options` as `[value, label]` pairs), optionally with a starting
+`value`; `values` are sent unchanged. The
+command gets one JSON object on standard input,
+`{"action": "tag", "kind": "problem", "target": "own/arXiv-2412.06316/OP-004",
+"values": {"value": "spanners"}}`, changes its own records, rewrites the labels
+file, and prints a short message (shown in the workbench) or fails with a
+message on standard error.
+
 The four top-level views have reloadable paths: `/research`, `/papers`,
 `/manuscripts`, and `/activity`. Their query strings capture the complete
 navigation state: `q` for search; the same review/filter parameters as the
