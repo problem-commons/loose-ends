@@ -1458,8 +1458,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     try:
-        codex = codex_cli.resolve_codex_executable(args.codex)
-        codex_version = codex_cli.read_codex_version(codex)
+        codex, codex_version = codex_cli.codex_runtime(
+            args.codex,
+            options,
+            *((review_options,) if args.review != "none" else ()),
+        )
         # Probe once before announcing or submitting the batch.  Per-turn
         # probing remains as a guard against a helper that fails later, but a
         # persistently broken Windows helper must not create one workspace and
@@ -1569,7 +1572,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"Reviewing {len(selected_attempts)} new attempt(s), with up "
                 f"to {min(args.review_jobs or args.jobs, len(selected_attempts))} "
-                f"Codex critic(s) at once."
+                f"{codex_cli.agent_display_name(review_options)} critic(s) at once."
             )
             review_finished_count = 0
 

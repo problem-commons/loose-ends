@@ -3871,7 +3871,7 @@ function catalogTranscriptFold(kind, item) {
 function codexTranscript(source) {
   const element = node("section", "codex-transcripts");
   element.dataset.codexSource = source;
-  element.append(node("h3", "", "Codex transcript"));
+  element.append(node("h3", "", "Agent transcript"));
   return element;
 }
 
@@ -3881,16 +3881,62 @@ function refreshVisibleCodexLogs() {
   });
 }
 
+function claudeToolDetail(input) {
+  if (!input || typeof input !== "object") return "";
+  return input.command || input.file_path || input.path || input.pattern || input.query || input.url || "";
+}
+
+function claudeResultText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return JSON.stringify(content ?? "");
+  return content.map(part => typeof part === "string" ? part : part?.text ?? JSON.stringify(part)).join("\n");
+}
+
+// Claude Code's stream-json events, mapped onto the item shapes of Codex.
+function addClaudeItems(items, event, turn, next) {
+  if (event.type === "assistant" || event.type === "user") {
+    const content = Array.isArray(event.message?.content) ? event.message.content : [];
+    for (const block of content) {
+      if (block?.type === "text" && event.type === "assistant") {
+        items.set(`${turn}:claude:${next()}`, { type: "agent_message", text: block.text || "" });
+      } else if (block?.type === "thinking") {
+        items.set(`${turn}:claude:${next()}`, { type: "reasoning", text: block.thinking || "" });
+      } else if (block?.type === "tool_use") {
+        items.set(`${turn}:tool:${block.id ?? next()}`, {
+          type: block.name || "tool_use", command: claudeToolDetail(block.input),
+          status: "in_progress", text: JSON.stringify(block.input ?? {}, null, 2),
+        });
+      } else if (block?.type === "tool_result") {
+        const key = `${turn}:tool:${block.tool_use_id}`;
+        const item = items.get(key) || { type: "tool_result" };
+        items.set(key, {
+          ...item, aggregated_output: claudeResultText(block.content),
+          status: block.is_error ? "failed" : "completed",
+        });
+      }
+    }
+  } else if (event.type === "result") {
+    if (event.is_error) {
+      items.set(`error:${next()}`, { type: "error", text: event.result || event.subtype || JSON.stringify(event) });
+    }
+    if (event.usage) items.set(`usage:${next()}`, { type: "usage", text: JSON.stringify(event.usage) });
+  }
+}
+
 function codexItems(text) {
   const items = new Map();
   let turn = 0;
   let sequence = 0;
+  const next = () => sequence++;
   for (const line of text.split("\n")) {
     let event;
     try { event = JSON.parse(line); } catch { continue; }
     if (!event || typeof event !== "object") continue;
     if (event.type === "thread.started" || event.type === "turn.started") turn++;
-    if (event.item && typeof event.item === "object") {
+    if (event.type === "system" && event.subtype === "init") turn++;
+    if (["assistant", "user", "result"].includes(event.type)) {
+      addClaudeItems(items, event, turn, next);
+    } else if (event.item && typeof event.item === "object") {
       items.set(`${turn}:${event.item.id ?? sequence++}`, event.item);
     } else if (event.type === "error" || event.type === "turn.failed") {
       items.set(`error:${sequence++}`, { type: "error", text: event.message || event.error?.message || JSON.stringify(event) });
@@ -3902,9 +3948,9 @@ function codexItems(text) {
 }
 
 function renderCodexTranscript(element, transcripts) {
-  element.replaceChildren(node("h3", "", "Codex transcript"));
+  element.replaceChildren(node("h3", "", "Agent transcript"));
   if (!transcripts.length) {
-    element.append(node("p", "muted", "No saved Codex transcript available yet."));
+    element.append(node("p", "muted", "No saved agent transcript available yet."));
   }
   for (const transcript of transcripts) {
     element.append(node("h4", "codex-invocation-heading", transcript.label));

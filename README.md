@@ -454,7 +454,8 @@ provenance, the ordered paper-author list, and a machine-readable index of the
 `OP-###` entries. The JSONL event stream and stderr log are retained for
 diagnostics.
 
-Install and authenticate the Codex CLI first, then analyze one paper:
+Install and authenticate the Codex CLI first (or Claude Code, with
+`--agent claude`), then analyze one paper:
 
 ```sh
 codex login
@@ -1169,9 +1170,9 @@ interrupted and runs that installed no output can be retried. A run that
 installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
-In **Activity**, expand **Codex transcript** for a read-only
-transcript: Codex messages appear as Markdown, with expandable task prompts,
-tool activity, and diagnostics. Transcripts refresh while the run is active.
+In **Activity**, expand **Agent transcript** for a read-only
+transcript: agent messages appear as Markdown, with expandable task prompts,
+tool activity, and diagnostics, for Codex and Claude Code runs alike. Transcripts refresh while the run is active.
 The **command & output** fold opens independently.
 Each problem also has a **Full reports → Codex logs** tab for the selected
 attempt's saved solution/review logs and the problem's triage/literature logs.
@@ -1319,9 +1320,9 @@ Requirements and differences:
   re-runs work instead of reusing results. Codex digests are unchanged.
   Manifests of non-Codex runs record `requested_agent` and `agent_version`.
 * Usage tracking records Claude Code tokens; its cost estimate shows as
-  unknown because the price table covers OpenAI models only. The Codex CLI
-  must currently still be installed, because commands query its version at
-  startup.
+  unknown because the price table covers OpenAI models only. Runs in which
+  every turn uses Claude Code do not need the Codex CLI; their manifests
+  record its version as `not installed`.
 
 ## Development
 

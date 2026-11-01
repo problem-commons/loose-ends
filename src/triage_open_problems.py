@@ -633,11 +633,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if stale:
         try:
-            codex = (
-                repaired_codex
-                or codex_cli.resolve_codex_executable(args.codex)
-            )
-            codex_version = codex_cli.read_codex_version(codex)
+            if repaired_codex:
+                codex = repaired_codex
+                codex_version = codex_cli.read_codex_version(codex)
+            else:
+                codex, codex_version = codex_cli.codex_runtime(
+                    args.codex, options
+                )
         except common.CodexError as exc:
             return codex_cli.report_error(parser, exc)
     else:

@@ -401,6 +401,18 @@ class WorkbenchAndUsageTests(unittest.TestCase):
         self.assertIsNone(workbench_usage.claude_token_usage({"input_tokens": -1}))
 
 
+class CodexOptionalTests(unittest.TestCase):
+    def test_claude_only_runs_do_not_need_codex(self):
+        claude = codex_cli.ModelOptions(agent="claude")
+        self.assertEqual(
+            codex_cli.codex_runtime("no-such-codex-binary", claude, claude),
+            ("no-such-codex-binary", "not installed"),
+        )
+        for options in ((codex_cli.ModelOptions(),), (claude, codex_cli.ModelOptions())):
+            with self.subTest(options=options), self.assertRaises(codex_cli.CodexError):
+                codex_cli.codex_runtime("no-such-codex-binary", *options)
+
+
 class PersonalDefaultTests(unittest.TestCase):
     """LOOSE_ENDS_AGENT/MODEL/REASONING_EFFORT set per-person defaults."""
 

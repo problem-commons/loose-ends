@@ -638,6 +638,21 @@ def resolve_codex_executable(value: str) -> str:
     return executable
 
 
+def codex_runtime(command: str, *options: ModelOptions) -> tuple[str, str]:
+    """Resolve Codex and its version for a run with the given agents.
+
+    Runs whose every turn uses another agent do not need Codex installed;
+    they record the Codex version as "not installed".
+    """
+    try:
+        codex = resolve_codex_executable(command)
+        return codex, read_codex_version(codex)
+    except CodexError:
+        if options and all(option.agent_name != "codex" for option in options):
+            return command, "not installed"
+        raise
+
+
 def read_codex_version(codex: str) -> str:
     try:
         completed = subprocess.run(

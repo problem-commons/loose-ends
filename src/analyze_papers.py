@@ -874,7 +874,10 @@ def main(argv: list[str] | None = None) -> int:
         codex = resolve_codex_executable(args.codex)
         codex_version = read_codex_version(codex)
     except (AnalysisError, OSError) as exc:
-        return codex_cli.report_error(parser, exc)
+        if options.agent_name == "codex":
+            return codex_cli.report_error(parser, exc)
+        # Claude Code runs do not need Codex installed.
+        codex, codex_version = args.codex, "not installed"
 
     if args.recover_complete:
         print(

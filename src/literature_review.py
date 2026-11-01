@@ -964,8 +964,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if stale:
         try:
-            codex = codex_cli.resolve_codex_executable(args.codex)
-            codex_version = codex_cli.read_codex_version(codex)
+            codex, codex_version = codex_cli.codex_runtime(args.codex, options)
         except common.CodexError as exc:
             return codex_cli.report_error(parser, exc)
     else:

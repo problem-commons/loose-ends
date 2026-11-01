@@ -2484,8 +2484,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        codex = codex_cli.resolve_codex_executable(args.codex)
-        codex_version = codex_cli.read_codex_version(codex)
+        codex, codex_version = codex_cli.codex_runtime(
+            args.codex, options, review_options
+        )
         latexmk = resolve_latexmk(args.latexmk)
         manuscript_directory.mkdir(parents=True, exist_ok=True)
         print(

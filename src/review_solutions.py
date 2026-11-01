@@ -1043,13 +1043,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if pending:
         try:
-            codex = codex_cli.resolve_codex_executable(args.codex)
-            codex_version = codex_cli.read_codex_version(codex)
+            codex, codex_version = codex_cli.codex_runtime(args.codex, options)
         except common.CodexError as exc:
             return codex_cli.report_error(parser, exc)
         print(
             f"Reviewing {len(pending)} attempt(s), with up to "
-            f"{min(args.jobs, len(pending))} Codex critic(s) at once."
+            f"{min(args.jobs, len(pending))} "
+            f"{codex_cli.agent_display_name(options)} critic(s) at once."
         )
         finished_count = 0
 

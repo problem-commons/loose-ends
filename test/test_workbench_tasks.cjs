@@ -5,7 +5,8 @@ const vm = require("node:vm");
 
 const source = readFileSync(`${__dirname}/../src/workbench_web/app.js`, "utf8");
 const functions = [
-  "latestJobRuns", "retryJob", "codexItems", "refreshCodexLogs",
+  "latestJobRuns", "retryJob", "claudeToolDetail", "claudeResultText", "addClaudeItems",
+  "codexItems", "refreshCodexLogs",
   "separateWriteTasks", "taskRequests", "taskRequestOptions", "taskTargetsForRequest",
   "targetKey", "targetCountLabel", "reviewTask", "confirmTask", "collectDialogOptions",
   "saveProblemEditor", "configuredMemoryLimit", "renderMemoryControl",
@@ -250,6 +251,32 @@ test("Codex transcript updates items and keeps repeated IDs in later turns", () 
   assert.equal(items[0].aggregated_output, "done");
   assert.equal(items[1].text, "Hello");
   assert.equal(items[2].text, "failure");
+});
+
+test("Claude Code stream-json events render as transcript items", () => {
+  const context = vm.createContext({});
+  vm.runInContext(functions, context);
+  const events = [
+    { type: "system", subtype: "init", model: "opus" },
+    { type: "assistant", message: { content: [
+      { type: "thinking", thinking: "Plan" },
+      { type: "text", text: "Reading the paper." },
+      { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls inputs" } },
+    ] } },
+    { type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "toolu_1", content: [{ type: "text", text: "paper.pdf" }] },
+    ] } },
+    { type: "result", subtype: "success", is_error: false, result: "done", usage: { input_tokens: 5 } },
+  ].map(value => JSON.stringify(value)).join("\n");
+  const items = context.codexItems(events);
+  assert.deepEqual(Array.from(items, item => item.type), ["reasoning", "agent_message", "Bash", "usage"]);
+  assert.equal(items[1].text, "Reading the paper.");
+  assert.equal(items[2].command, "ls inputs");
+  assert.equal(items[2].aggregated_output, "paper.pdf");
+  assert.equal(items[2].status, "completed");
+  const failed = context.codexItems(JSON.stringify({ type: "result", is_error: true, result: "usage limit reached" }));
+  assert.equal(failed[0].type, "error");
+  assert.equal(failed[0].text, "usage limit reached");
 });
 
 test("shared transcript loader preserves report queries and pages both sources", async () => {
