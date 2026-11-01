@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import export_problem_context
+import human_review
 import import_attempt
 import open_problem_common as common
 import review_solutions
@@ -145,6 +146,10 @@ class OutsideAttemptTests(unittest.TestCase):
         self.assertEqual(
             common.read_json(attempt / "solver-result.json")["claimed_result_type"],
             "partial_result",
+        )
+        self.assertEqual(
+            human_review.attempt_origin(attempt)["session"],
+            "sessions/2026-11-02-kbuchin-bound",
         )
         problem = export_problem_context.resolve_problem(self.problem_path)
         names = [ref.name for ref in review_solutions.discover_attempt_refs([problem])]

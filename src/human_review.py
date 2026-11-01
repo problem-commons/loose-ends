@@ -60,6 +60,27 @@ def _attempt_number(attempt: review_solutions.AttemptRef) -> int:
     return int(match.group(1)) if match else -1
 
 
+ORIGIN_TEXT_FIELDS = ("kind", "source", "session", "note")
+ORIGIN_LIST_FIELDS = ("people", "agents", "models")
+
+
+def attempt_origin(directory: Path) -> dict | None:
+    """Where an attempt made outside the solver came from (import_attempt.py)."""
+    manifest = common.load_json(directory / "manifest.json")
+    origin = manifest.get("origin") if manifest else None
+    if not isinstance(origin, dict) or not isinstance(origin.get("kind"), str):
+        return None
+    cleaned: dict[str, object] = {}
+    for key in ORIGIN_TEXT_FIELDS:
+        if isinstance(origin.get(key), str):
+            cleaned[key] = origin[key]
+    for key in ORIGIN_LIST_FIELDS:
+        values = origin.get(key)
+        if isinstance(values, list):
+            cleaned[key] = [value for value in values if isinstance(value, str)]
+    return cleaned
+
+
 def discover_human_reviews(
     problems: Iterable[common.ProblemRef],
     *,
@@ -815,6 +836,11 @@ def build_review_catalog(
                 ),
                 "attemptNumber": (
                     _attempt_number(attempt) if attempt is not None else -1
+                ),
+                "attemptOrigin": (
+                    attempt_origin(attempt.directory)
+                    if attempt is not None
+                    else None
                 ),
                 "totalAttemptCount": problem_attempt_counts[problem_key],
                 "priority": item.priority if item is not None else "",

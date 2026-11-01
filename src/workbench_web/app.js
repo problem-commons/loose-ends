@@ -2268,6 +2268,7 @@ function problemDetailBadges(item, dimensions) {
     if (value.dimension === "priority") className = value.value === "high" ? "error" : value.value === "medium" ? "warn" : "neutral";
     else if (value.dimension === "warning") className = "error";
     else if (["coverage", "importance", "confidence", "literature"].includes(value.dimension)) className = "neutral";
+    else if (value.dimension === "origin") className = "origin";
     badges.append(node("span", `badge ${className || "neutral"}`, value.label));
   });
   return badges;
@@ -2421,7 +2422,7 @@ function renderReviewDetail(item) {
     const solution = node("section", "section problem-solution");
     const heading = node("div", "section-title");
     const label = node("div", "problem-section-label");
-    label.append(node("h2", "", "Solution claims"), problemDetailBadges(item, ["status", "claim", "warning"]));
+    label.append(node("h2", "", "Solution claims"), problemDetailBadges(item, ["status", "claim", "origin", "warning"]));
     heading.append(label, problemDocumentButton("Read full solution", "attempt"));
     solution.append(heading);
     solution.append(markdown(item.solverSummary, "No solver summary available."));
