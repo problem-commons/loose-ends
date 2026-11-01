@@ -42,6 +42,7 @@ import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
 from workbench_usage import UsageIndex
 from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
+import workbench_organize
 from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
     PlanError,
@@ -66,6 +67,7 @@ DEFAULT_STATE_DIRECTORY = PROJECT_ROOT / ".loose-ends"
 SCHEDULER_ERROR_RETRY_SECONDS = 5.0
 DEFAULT_MANUSCRIPTS = PROJECT_ROOT / "manuscripts"
 IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs"}
+LABEL_POLL_SECONDS = 2.0
 IGNORED_PREFIXES = (
     ".run-",
     ".recover-",
@@ -710,6 +712,8 @@ class CatalogManager:
             "loading": True,
         }
         self.fingerprint = ""
+        # Adds collections, labels and stars to a snapshot (WorkbenchApplication).
+        self.organizer = None
         self.paper_caches: dict[str, dict] = {}
         self.manuscript_cache: dict | None = None
         self.paper_updates: dict[str, dict] = {}
@@ -1180,7 +1184,9 @@ class CatalogManager:
                     "files",
                 ):
                     item.pop(field, None)
-            return value
+        if self.organizer is not None:
+            self.organizer(value)
+        return value
 
     def review_detail(self, key: str) -> dict:
         with self.lock:
@@ -1191,6 +1197,8 @@ class CatalogManager:
             if item is None:
                 raise KeyError(key)
             value = dict(item)
+        if self.organizer is not None:
+            self.organizer({"reviews": [value]})
         value.update(human_review.load_review_contents(value))
         value["files"] = human_review.load_review_files(value)
         value["fileCount"] = len(value["files"])
@@ -1530,6 +1538,7 @@ class WorkbenchApplication:
         paths: list[Path],
         manuscripts: Path,
         state_directory: Path,
+        labels: Iterable[Path] = (),
     ):
         self.paths = paths
         self.paper_output_roots = [
@@ -1568,6 +1577,37 @@ class WorkbenchApplication:
         self.observer = None
         self.usage = UsageIndex(self.store, paths, manuscripts, self.hub)
         self.usage.start()
+        self.labels = workbench_organize.LabelSource(list(labels))
+        for error in self.labels.errors:
+            print(f"warning: {error}", file=sys.stderr)
+        self.stars = workbench_organize.StarStore(state_directory)
+        self.catalog.organizer = self.organize
+        self.closing = threading.Event()
+        self.label_thread: threading.Thread | None = None
+
+    def organize(self, value: dict) -> dict:
+        return workbench_organize.organize(
+            value, self.catalog.paths, self.labels.current(), self.stars.load()
+        )
+
+    def _watch_labels(self) -> None:
+        while not self.closing.wait(LABEL_POLL_SECONDS):
+            if self.labels.refresh():
+                for error in self.labels.errors:
+                    print(f"warning: {error}", file=sys.stderr)
+                self.hub.publish("catalog.changed", version=self.catalog.version)
+
+    def set_star(self, request: dict) -> dict:
+        kind = request.get("kind")
+        key = request.get("key")
+        starred = request.get("starred")
+        if kind not in ("papers", "problems") or not isinstance(key, str) or not key:
+            raise PlanError("a star needs kind (papers or problems) and key")
+        if not isinstance(starred, bool):
+            raise PlanError("starred must be true or false")
+        self.stars.set(kind, key, starred)
+        self.hub.publish("catalog.changed", version=self.catalog.version)
+        return {"kind": kind, "key": key, "starred": starred}
 
     def start_watching(self) -> None:
         if Observer is None:
@@ -1598,6 +1638,11 @@ class WorkbenchApplication:
         )
         observer.start()
         self.observer = observer
+        if self.labels.paths:
+            self.label_thread = threading.Thread(
+                target=self._watch_labels, name="label-watch", daemon=True
+            )
+            self.label_thread.start()
 
     def create_plan(self, request: dict) -> dict:
         plan = build_plan(
@@ -2041,6 +2086,7 @@ class WorkbenchApplication:
         return result
 
     def close(self) -> None:
+        self.closing.set()
         if self.observer is not None:
             self.observer.stop()
             self.observer.join(timeout=5)
@@ -2265,6 +2311,7 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                                 str(path) for path in self.app.paper_output_roots
                             ],
                             "taskDefaults": self.app.task_defaults,
+                            "labelErrors": list(self.app.labels.errors),
                         },
                     }
                 )
@@ -2401,6 +2448,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self.app.hub.publish("settings.changed", **settings)
             elif parsed.path == "/api/manuscripts/pinning":
                 self.send_json(self.app.set_manuscript_pinning(body))
+            elif parsed.path == "/api/stars":
+                self.send_json(self.app.set_star(body))
             elif match := re.fullmatch(
                 r"/api/jobs/([0-9a-f-]+)/scheduling", parsed.path
             ):
@@ -2791,6 +2840,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_STATE_DIRECTORY,
     )
+    parser.add_argument(
+        "--labels",
+        action="append",
+        default=[],
+        type=Path,
+        metavar="FILE",
+        help=(
+            "JSON file of labels for papers and problems (collections, "
+            "exclusions, tags); re-read when it changes; may be repeated"
+        ),
+    )
     parser.add_argument("--no-open", action="store_true")
     return parser
 
@@ -2814,6 +2874,7 @@ def main(argv: list[str] | None = None) -> int:
             paths=paths,
             manuscripts=manuscripts,
             state_directory=state_directory,
+            labels=args.labels,
         )
         app.start_watching()
         server = WorkbenchHTTPServer(

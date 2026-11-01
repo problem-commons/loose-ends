@@ -1746,6 +1746,116 @@ function filterToggle(label, checked, handler, { priority = "", availability = "
   return wrapper;
 }
 
+// Collections, labels and stars (workbench_organize.py). The options depend on
+// the catalog, so syncSidebarControls rebuilds these controls on every render.
+function organizeFilterNodes(kind) {
+  const rows = kind === "papers" ? state.catalog.papers : state.catalog.reviews;
+  const filters = () => (kind === "papers" ? state.paperFilters : state.researchFilters);
+  const select = (label, key, options) => {
+    const wrapper = node("label", "filter-control");
+    wrapper.append(node("span", "", label));
+    const element = node("select");
+    element.dataset.organizeKey = key;
+    const current = filters()[key];
+    const values = options.some(([value]) => value === current)
+      ? options
+      : [...options, [current, `${current} (none shown)`]];
+    values.forEach(([value, text]) => {
+      const option = node("option", "", text);
+      option.value = value;
+      option.selected = current === value;
+      element.append(option);
+    });
+    element.addEventListener("change", () => {
+      filters()[key] = element.value;
+      syncListNavigation();
+    });
+    wrapper.append(element);
+    return wrapper;
+  };
+  const nodes = [];
+  const collections = reviewModel.collectionOptions(rows);
+  if (collections.length > 2 || filters().collection !== "all") {
+    nodes.push(select("Collection", "collection", collections));
+  }
+  const labels = reviewModel.labelOptions(rows);
+  if (labels.length > 1 || filters().label !== "all") nodes.push(select("Label", "label", labels));
+  const toggles = node("div", "filter-toggles organize-toggles");
+  const starred = new Set(rows.filter(row => row.starred).map(row => row.problemKey || row.key)).size;
+  if (starred || filters().starred) {
+    toggles.append(filterToggle(`Starred only (${starred})`, filters().starred, checked => {
+      filters().starred = checked;
+    }));
+  }
+  const hidden = reviewModel.hiddenCount(rows);
+  if (hidden || filters().hidden) {
+    const toggle = filterToggle(`Show hidden (${hidden})`, filters().hidden, checked => {
+      filters().hidden = checked;
+    });
+    toggle.title = "Items with a hidden label, such as excluded problems";
+    toggles.append(toggle);
+  }
+  if (toggles.children.length) nodes.push(toggles);
+  return nodes;
+}
+
+function organizeFilters(kind) {
+  const wrapper = node("div", "organize-filters");
+  wrapper.dataset.organizeKind = kind;
+  wrapper.append(...organizeFilterNodes(kind));
+  wrapper.hidden = !wrapper.children.length;
+  return wrapper;
+}
+
+function syncOrganizeFilters(controls, kind) {
+  const wrapper = controls.querySelector(`.organize-filters[data-organize-kind="${kind}"]`);
+  if (!wrapper) return;
+  wrapper.replaceChildren(...organizeFilterNodes(kind));
+  wrapper.hidden = !wrapper.children.length;
+}
+
+function hiddenNote(rows, filters) {
+  if (filters.hidden) return "";
+  const count = reviewModel.hiddenCount(rows);
+  return count ? ` · ${count} hidden` : "";
+}
+
+function organizeTagsNode(item) {
+  const tags = node("span", "attempt-tags");
+  reviewModel.organizeTags(item).forEach(value => {
+    const tag = node("span", `attempt-tag ${value.className}`, value.label);
+    tag.title = value.title;
+    tags.append(tag);
+  });
+  return tags;
+}
+
+function labelBadges(item) {
+  const wrapper = node("div", "badges label-badges");
+  if (item.collection) wrapper.append(node("span", "badge collection", `collection ${item.collection}`));
+  (item.labels || []).forEach(label => {
+    const value = node("span", `badge ${label.hidden ? "warn" : "label"}`, label.label);
+    value.title = `${label.hidden ? "Hidden label" : "Label"}${label.title ? `: ${label.title}` : ""}`;
+    wrapper.append(value);
+  });
+  return wrapper;
+}
+
+function starButton(kind, key, starred) {
+  const element = button(starred ? "★ Starred" : "☆ Star", async () => {
+    element.disabled = true;
+    try {
+      await api("/api/stars", { method: "POST", body: { kind, key, starred: !starred } });
+      await refreshCatalog();
+    } catch (error) {
+      showNotice(error.message, true);
+      element.disabled = false;
+    }
+  }, `button star-button${starred ? " starred" : ""}`);
+  element.title = `${starred ? "Remove the star" : "Star this"}; stars are personal and stay with this workbench`;
+  return element;
+}
+
 function renderResearchFilters() {
   const details = node("details", "research-filters");
   details.open = state.researchFiltersOpen;
@@ -1758,6 +1868,7 @@ function renderResearchFilters() {
   details.append(summary);
   const controls = node("div", "research-filter-grid");
   controls.append(
+    organizeFilters("research"),
     filterControl("Attempt status", "attemptStatus", reviewModel.filterOptions.attemptStatus),
     filterControl("Triage recommendation", "triage", reviewModel.filterOptions.triage),
     filterControl("Claim type", "claim", reviewModel.filterOptions.claim),
@@ -1822,6 +1933,7 @@ function renderPaperFilters() {
   details.append(summary);
   const controls = node("div", "research-filter-grid paper-filter-grid");
   controls.append(
+    organizeFilters("papers"),
     paperFilterControl("Metadata", "metadata", reviewModel.paperFilterOptions.metadata),
     paperFilterControl("Analysis", "analysis", reviewModel.paperFilterOptions.analysis),
     paperFilterControl("Open problems", "problems", reviewModel.paperFilterOptions.problems),
@@ -1914,8 +2026,10 @@ function syncSidebarControls(tab, controls) {
     updateVisiblePaperSelectionControl(
       controls.querySelector("input[data-select-visible-papers]"),
     );
+    syncOrganizeFilters(controls, "papers");
   }
   if (tab !== "research") return;
+  syncOrganizeFilters(controls, "research");
 
   const details = controls.querySelector(".research-filters");
   if (details && details.open !== state.researchFiltersOpen) {
@@ -1985,7 +2099,9 @@ function renderResearch() {
     );
   }
   const listScroll = node("div", "problem-scroll");
-  listScroll.append(node("div", "sidebar-heading queue-summary", reviewModel.queueSummary(reviews, state.researchFilters)));
+  listScroll.append(node("div", "sidebar-heading queue-summary",
+    reviewModel.queueSummary(reviews, state.researchFilters)
+      + hiddenNote(state.catalog.reviews, state.researchFilters)));
   for (const group of paperGroups) {
     const paperHeading = node("div", "sidebar-heading paper-heading");
     const paperHeadingLabel = reviewModel.paperTitleWithYear(
@@ -2338,7 +2454,8 @@ function renderReviewDetail(item) {
   copy.append(inlineMarkdown("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
   copy.append(inlineMarkdown("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
-  hero.append(copy);
+  if (item.collection || item.labels?.length) copy.append(labelBadges(item));
+  hero.append(copy, starButton("problems", item.problemKey, Boolean(item.starred)));
   shell.append(hero);
 
   const problem = problemTarget(item);
@@ -2592,6 +2709,7 @@ function renderPapers() {
       paper.publicationTimestamp,
     ),
     meta: paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed",
+    tags: reviewModel.organizeTags(paper).length ? organizeTagsNode(paper) : undefined,
     active: state.selectedPaper === paper.key,
     selectedTarget: paperTarget(paper),
     relatedTask: {
@@ -2601,7 +2719,10 @@ function renderPapers() {
     onClick: () => { state.selectedPaper = paper.key; syncNavigation(); },
   }));
   const paperScroll = node("div", "paper-scroll");
-  paperScroll.append(node("div", "sidebar-heading", `${papers.length} papers`), list);
+  paperScroll.append(
+    node("div", "sidebar-heading", `${papers.length} papers${hiddenNote(state.catalog.papers, state.paperFilters)}`),
+    list,
+  );
   sidebar.append(paperScroll);
   const paper = state.catalog.papers.find(value => value.key === state.selectedPaper);
   if (!paper) {
@@ -2640,7 +2761,8 @@ function renderPapers() {
   badges.append(badge(paper.analyzed ? "analyzed" : "not analyzed", paper.analyzed ? "succeeded" : "warn"));
   if (paper.analyzed) badges.append(badge(`${paper.problemCount} problems`, "neutral"));
   copy.append(badges);
-  hero.append(copy);
+  if (paper.collection || paper.labels?.length) copy.append(labelBadges(paper));
+  hero.append(copy, starButton("papers", paper.key, Boolean(paper.starred)));
   shell.append(hero);
   const actions = node("div", "actions");
   addAction(

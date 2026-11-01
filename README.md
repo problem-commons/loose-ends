@@ -1194,6 +1194,37 @@ Markdown/LaTeX statement. Manually entered problems default to `additional`,
 distinguishing them from problems explicitly stated in or inferred from the
 paper, and are included in the normal triage, literature, and solving flows.
 
+### Collections, labels and stars
+
+Large catalogs can be narrowed in the Problem and Paper filters:
+
+- **Collections** are the first directory level below a paper root
+  (`papers/own/arXiv-...` belongs to `own`). The Collection filter appears once
+  a root holds more than one.
+- **Labels** come from JSON files given with `--labels FILE` (repeatable),
+  typically written by a project's own tooling. Each entry names a paper or
+  problem by its path below a paper root (an arXiv paper also without its
+  version) and may hide it by default:
+
+  ```json
+  {"schema_version": 1, "labels": [
+    {"target": "own/arXiv-2412.06316", "label": "spanners"},
+    {"target": "own/arXiv-2412.06316/OP-004", "label": "excluded",
+     "hidden": true, "title": "Ongoing work of a member"}
+  ]}
+  ```
+
+  Labels on a paper apply to all its problems. Labels appear as tags and in a
+  Label filter; items with a hidden label stay out of view until **Show
+  hidden** is ticked or that label is selected. The server re-reads the files
+  when they change.
+- **Stars** are personal: the star button on a problem or paper toggles it,
+  **Starred only** filters for it, and the stars stay in the workbench state
+  directory (`.loose-ends/stars.json`).
+
+All three are part of the reloadable query string (`collection`, `label`,
+`starred=1`, `hidden=show`).
+
 The four top-level views have reloadable paths: `/research`, `/papers`,
 `/manuscripts`, and `/activity`. Their query strings capture the complete
 navigation state: `q` for search; the same review/filter parameters as the

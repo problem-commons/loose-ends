@@ -15,6 +15,8 @@ const functions = [
   "syncListNavigation", "rememberSidebarScroll", "restoreSidebarScroll", "revealIfHidden", "revealCentered",
   "paperSortControl", "manuscriptSortControl", "normalizeManuscriptSort",
   "olderVersionWarning", "olderAttemptWarning", "openRoute",
+  "organizeFilterNodes", "organizeFilters", "syncOrganizeFilters", "hiddenNote",
+  "organizeTagsNode", "labelBadges", "starButton",
 ].map(name => source.match(new RegExp(`^function ${name}[(][^]*?^}`, "m"))[0]).join("\n");
 
 test("nearest matching selection keeps matches, measures distance, and prefers following ties", () => {
@@ -352,4 +354,35 @@ test("attempts made outside the solver show where they came from", () => {
   assert.equal(reviewModel.summaryCards(external)[0].title, "Project claim · partial result");
   assert.equal(reviewModel.attemptTags(base).some(value => value.dimension === "origin"), false);
   assert.equal(reviewModel.summaryCards(base)[0].title, "Solver claim · partial result");
+});
+
+test("collections, labels and stars filter problems and papers; hidden items stay out of view", () => {
+  const row = (key, extra) => ({ problemKey: key, itemKey: `${key}-1`, attemptStatus: "unattempted", ...extra });
+  const items = [
+    row("a", { collection: "own", labels: [{ label: "frechet", hidden: false }], starred: true }),
+    row("b", { collection: "own", labels: [{ label: "excluded", hidden: true, title: "Ongoing" }], hidden: true }),
+    row("c", { collection: "watchmen", labels: [] }),
+  ];
+  const keys = filters => reviewModel.filterItems(items, filters).map(item => item.problemKey);
+  const filters = reviewModel.createDefaultFilters();
+  assert.deepEqual(keys(filters), ["a", "c"]);
+  assert.deepEqual(keys({ ...filters, hidden: true }), ["a", "b", "c"]);
+  assert.deepEqual(keys({ ...filters, collection: "own" }), ["a"]);
+  assert.deepEqual(keys({ ...filters, label: "excluded" }), ["b"]);
+  assert.deepEqual(keys({ ...filters, starred: true }), ["a"]);
+  assert.deepEqual(reviewModel.filterItems(items, filters, "watchmen").map(item => item.problemKey), ["c"]);
+  assert.deepEqual(Array.from(reviewModel.collectionOptions(items), ([value]) => value), ["all", "own", "watchmen"]);
+  assert.deepEqual(Array.from(reviewModel.labelOptions(items), ([, text]) => text),
+    ["Any label", "excluded · hidden (1)", "frechet (1)"]);
+  assert.equal(reviewModel.hiddenCount(items), 1);
+  assert.deepEqual(Array.from(reviewModel.organizeTags(items[0]), tag => tag.label), ["★", "frechet"]);
+  const parameters = reviewModel.filtersToSearchParams(new URLSearchParams(),
+    { ...filters, collection: "own", label: "frechet", starred: true, hidden: true });
+  assert.equal(parameters.toString(), "collection=own&label=frechet&starred=1&hidden=show");
+  const restored = reviewModel.filtersFromSearchParams(parameters);
+  assert.deepEqual([restored.collection, restored.label, restored.starred, restored.hidden],
+    ["own", "frechet", true, true]);
+  const papers = [{ key: "p", path: "p", collection: "own", hidden: true, labels: [{ label: "x", hidden: true }] }];
+  assert.equal(reviewModel.filterPapers(papers, reviewModel.createDefaultPaperFilters()).length, 0);
+  assert.equal(reviewModel.paperFiltersFromSearchParams(new URLSearchParams("hidden=show")).hidden, true);
 });
