@@ -1256,7 +1256,15 @@ usual. Each turn runs `claude -p` non-interactively with:
 * only the Bash, Read, Edit, and Write tools, plus WebSearch (`indexed`) or
   WebSearch and WebFetch (`live`) where the stage allows web search;
 * no MCP servers, skills, slash commands, or subagents, no saved session, and
-  only `local` settings (override with `LOOSE_ENDS_CLAUDE_SETTING_SOURCES`).
+  only `local` settings (override with `LOOSE_ENDS_CLAUDE_SETTING_SOURCES`);
+* no access to credentials: shell commands cannot read `~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, Claude Code's
+  and Codex's login files, and run without `GITHUB_TOKEN`, `GH_TOKEN`,
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `CODEX_API_KEY`; the Read tool is
+  denied the same paths. Papers and web pages are untrusted input, so a misled
+  turn must not be able to copy a token into its output or a web request.
+  (Codex's workspace-write sandbox restricts writes and network but not reads;
+  Loose Ends does not currently add read restrictions for Codex turns.)
 
 Requirements and differences:
 

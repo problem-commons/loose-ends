@@ -92,6 +92,35 @@ class ClaudeCommandTests(unittest.TestCase):
         # The variadic deny rule must not swallow a later argument.
         self.assertEqual(command[-2:], ["--disallowedTools", "mcp__*"])
 
+    def test_credentials_are_hidden_from_shell_and_file_tools(self):
+        command = codex_cli.build_claude_command(
+            claude="claude", options=codex_cli.ModelOptions(agent="claude")
+        )
+        settings = json.loads(command[command.index("--settings") + 1])
+        credentials = settings["sandbox"]["credentials"]
+        denied_files = {entry["path"] for entry in credentials["files"]}
+        self.assertTrue(
+            {"~/.ssh", "~/.config/gh", "~/.claude/.credentials.json",
+             "~/.codex/auth.json", "~/.git-credentials"} <= denied_files
+        )
+        self.assertTrue(all(entry["mode"] == "deny" for entry in credentials["files"]))
+        denied_variables = {entry["name"] for entry in credentials["envVars"]}
+        self.assertTrue({"GITHUB_TOKEN", "GH_TOKEN"} <= denied_variables)
+        deny_rules = settings["permissions"]["deny"]
+        self.assertIn("Read(~/.config/gh/**)", deny_rules)
+        self.assertIn("Read(~/.claude/.credentials.json)", deny_rules)
+        # Whole tool directories stay readable so shell support keeps working.
+        self.assertNotIn("~/.claude", denied_files)
+
+    def test_progress_messages_name_the_agent(self):
+        self.assertEqual(
+            codex_cli.agent_display_name(codex_cli.ModelOptions()), "Codex"
+        )
+        self.assertEqual(
+            codex_cli.agent_display_name(codex_cli.ModelOptions(agent="claude")),
+            "Claude Code",
+        )
+
     def test_web_search_modes_map_to_web_tools(self):
         def tools(mode):
             command = codex_cli.build_claude_command(

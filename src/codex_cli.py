@@ -43,10 +43,35 @@ CLAUDE_EFFORTS = {
     "max": "max",
     "ultra": "max",
 }
+# Credential files and variables that agent turns must never read.  Papers
+# and web pages are untrusted input, so a misled turn must not be able to copy
+# a token into its output or into a web request.  Specific files rather than
+# whole tool directories keep Claude Code's own shell support working.
+CREDENTIAL_DIRECTORIES = (
+    "~/.ssh",
+    "~/.aws",
+    "~/.gnupg",
+    "~/.config/gh",
+)
+CREDENTIAL_FILES = (
+    "~/.netrc",
+    "~/.git-credentials",
+    "~/.config/git/credentials",
+    "~/.claude/.credentials.json",
+    "~/.codex/auth.json",
+)
+CREDENTIAL_ENV_VARS = (
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+)
 # Mirror the Codex restrictions: shell commands run in Claude Code's OS-level
 # sandbox (writes limited to the workspace and temporary directory), with no
 # shell network access and no fallback to unsandboxed execution.  Web access,
 # when a stage allows it, goes only through the WebSearch/WebFetch tools.
+# Credentials are additionally hidden from both shell commands and file tools.
 CLAUDE_SANDBOX_SETTINGS = {
     "sandbox": {
         "enabled": True,
@@ -54,6 +79,21 @@ CLAUDE_SANDBOX_SETTINGS = {
         "autoAllowBashIfSandboxed": True,
         "allowUnsandboxedCommands": False,
         "network": {"allowedDomains": [], "strictAllowlist": True},
+        "credentials": {
+            "files": [
+                {"path": path, "mode": "deny"}
+                for path in (*CREDENTIAL_DIRECTORIES, *CREDENTIAL_FILES)
+            ],
+            "envVars": [
+                {"name": name, "mode": "deny"} for name in CREDENTIAL_ENV_VARS
+            ],
+        },
+    },
+    "permissions": {
+        "deny": [
+            *(f"Read({path}/**)" for path in CREDENTIAL_DIRECTORIES),
+            *(f"Read({path})" for path in CREDENTIAL_FILES),
+        ],
     },
 }
 DEFAULT_VALIDATION_PROMPT_PATH = (
@@ -1362,6 +1402,11 @@ def agent_version(agent: str) -> str:
         return read_codex_version(executable)
     except CodexError:
         return "unknown"
+
+
+def agent_display_name(options: ModelOptions) -> str:
+    """Human-readable agent name for progress messages."""
+    return "Claude Code" if options.agent_name == "claude" else "Codex"
 
 
 def agent_provenance(options: ModelOptions) -> dict[str, str]:

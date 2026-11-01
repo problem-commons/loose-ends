@@ -1466,9 +1466,12 @@ def main(argv: list[str] | None = None) -> int:
         return codex_cli.report_error(parser, exc)
     agent_count = min(args.jobs, len(work_items))
     if agent_count == 1:
-        concurrency = "sequentially with 1 Codex agent"
+        concurrency = f"sequentially with 1 {codex_cli.agent_display_name(options)} agent"
     else:
-        concurrency = f"with up to {agent_count} concurrent Codex agents"
+        concurrency = (
+            f"with up to {agent_count} concurrent "
+            f"{codex_cli.agent_display_name(options)} agents"
+        )
     round_phrase = (
         "one round"
         if args.max_rounds == 1

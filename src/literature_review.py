@@ -976,7 +976,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Searching literature for {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once "
+            f"{min(args.jobs, len(grouped))} "
+            f"{codex_cli.agent_display_name(options)} agent(s) at once "
             f"({args.web_search} web search)."
         )
         with ThreadPoolExecutor(
