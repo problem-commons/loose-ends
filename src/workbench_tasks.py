@@ -44,7 +44,7 @@ EDITABLE_TASK_OPTIONS = {
     "codexHome", "model", "reasoningEffort", "fast", "serviceTier", "webSearch", "prompt",
     "reviewModel", "reviewReasoningEffort", "reviewWebSearch", "reviewPrompt",
     "maxRounds", "review", "reviewTimeoutMinutes", "includeLiteratureResolved",
-    "mode", "timeoutMinutes", "force", "recoverComplete", "authors", "title",
+    "mode", "timeoutMinutes", "force", "reanalyze", "recoverComplete", "authors", "title",
 }
 
 
@@ -655,7 +655,17 @@ def build_plan(
             argv = [python, "-u", str(script / "analyze_papers.py"), str(path)]
             if options.get("force") is True:
                 argv.append("--force")
-                warnings.append("A forced analysis replaces the installed analysis.")
+                warnings.append(
+                    "A forced analysis replaces the installed analysis and "
+                    "renumbers its open problems."
+                )
+            elif options.get("reanalyze") is True:
+                argv.append("--reanalyze")
+                warnings.append(
+                    "Re-analysing a stale analysis renumbers its open problems; "
+                    "existing triage, literature, attempts, and records beside "
+                    "the paper tree keep the old numbers."
+                )
             if options.get("recoverComplete") is True:
                 argv.append("--recover-complete")
             _common_arguments(argv, options)

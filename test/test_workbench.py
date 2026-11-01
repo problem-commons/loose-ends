@@ -204,6 +204,30 @@ class WorkbenchPlanningTests(unittest.TestCase):
                         self.assertNotIn("codexHome", plan["options"])
                     self.assertEqual(request["options"]["codexHome"], value)
 
+    def test_reanalysis_is_explicit_and_warned(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+
+            def argv(options):
+                plan = build_plan(
+                    {
+                        "action": "analyze",
+                        "targets": [{"kind": "paper", "path": str(paper)}],
+                        "options": options,
+                    },
+                    project_root=PROJECT_ROOT, allowed_roots=[root],
+                    manuscripts=root / "manuscripts", catalog_version=1,
+                )
+                return plan["units"][0]["argv"], plan.get("warnings", [])
+
+            plain, plain_warnings = argv({})
+            again, warnings = argv({"reanalyze": True})
+        self.assertNotIn("--reanalyze", plain)
+        self.assertFalse(any("renumbers" in warning for warning in plain_warnings))
+        self.assertIn("--reanalyze", again)
+        self.assertTrue(any("renumbers" in warning for warning in warnings))
+
     def test_write_dialog_job_flow(self):
         result = subprocess.run(
             ["node", "--test", "test_workbench_tasks.cjs"],

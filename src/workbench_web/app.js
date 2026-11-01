@@ -4954,6 +4954,7 @@ function renderTaskConfiguration(errorMessage = "") {
     grid.append(checkbox("force", "Force replacement", "Run even if matching current output exists.", options.force));
   }
   if (task.action === "analyze") {
+    grid.append(checkbox("reanalyze", "Re-analyse stale analyses", "Off by default: an installed analysis is kept even when a new prompt or model setting made it stale, because re-analysis renumbers the paper's open problems while triage, attempts, and records keep the old numbers.", options.reanalyze));
     grid.append(checkbox("recoverComplete", "Recover completed workspace", "Install a preserved completed analysis without a new model turn.", options.recoverComplete));
   }
   if (task.action === "write") {

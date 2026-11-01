@@ -313,7 +313,7 @@ class AnalyzePaperTests(unittest.TestCase):
             self.assertTrue(manifest["requested_fast_mode"])
 
     @patch.object(analyze_papers.subprocess, "run")
-    def test_skips_a_current_analysis_and_reruns_after_source_change(self, run):
+    def test_skips_a_current_analysis_and_keeps_a_stale_one_unless_asked(self, run):
         with TemporaryDirectory() as temporary:
             paper = make_paper(Path(temporary))
             commands: list[list[str]] = []
@@ -334,13 +334,17 @@ class AnalyzePaperTests(unittest.TestCase):
                 encoding="utf-8",
             )
             third = analyze_paper(paper, **arguments)
+            fourth = analyze_paper(paper, reanalyze=True, **arguments)
 
             self.assertEqual(first.status, "analyzed")
             self.assertEqual(second.status, "current")
             self.assertEqual(second.result_count, 1)
             self.assertEqual(second.open_problem_count, 1)
             self.assertIn("1 result, 1 open problem", second.message)
-            self.assertEqual(third.status, "analyzed")
+            # A stale analysis is kept: re-analysis would renumber problems.
+            self.assertEqual(third.status, "kept")
+            self.assertIn("--reanalyze", third.message)
+            self.assertEqual(fourth.status, "analyzed")
             self.assertEqual(run.call_count, 2)
 
     @patch.object(analyze_papers.subprocess, "run")
@@ -374,7 +378,7 @@ class AnalyzePaperTests(unittest.TestCase):
                 2,
             )
             with self.assertRaises(AnalysisError):
-                analyze_paper(paper, **arguments)
+                analyze_paper(paper, reanalyze=True, **arguments)
 
             self.assertEqual(
                 (paper / "analysis" / "summary.md").read_text(encoding="utf-8"),
@@ -535,6 +539,34 @@ class MainOutputTests(unittest.TestCase):
         self.assertIn(str(Path(temporary) / ".codex"), error.getvalue())
         resolve.assert_not_called()
         analyze.assert_not_called()
+
+    def test_dry_run_keeps_stale_installed_analysis_unless_reanalyze(self):
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(analyze_papers, "analysis_is_current", return_value=False),
+            patch.object(analyze_papers, "result_count", return_value=4),
+            patch.dict(os.environ, {"CODEX_HOME": temporary}),
+        ):
+            paper = make_paper(Path(temporary))
+            analysis = paper / "analysis"
+            analysis.mkdir()
+            (analysis / "manifest.json").write_text(
+                json.dumps({"open_problems": [{"id": "OP-001"}, {"id": "OP-002"}]}),
+                encoding="utf-8",
+            )
+            kept, again = StringIO(), StringIO()
+            with redirect_stdout(kept), redirect_stderr(StringIO()):
+                analyze_papers.main([str(paper), "--dry-run"])
+            with redirect_stdout(again), redirect_stderr(StringIO()):
+                analyze_papers.main([str(paper), "--dry-run", "--reanalyze"])
+
+        self.assertIn(f"Would keep: {paper}", kept.getvalue())
+        self.assertIn("4 results, 2 open problems", kept.getvalue())
+        self.assertIn("0 would run; 0 current; 1 stale but kept", kept.getvalue())
+        self.assertIn(
+            f"Would analyze: {paper} (stale; renumbers its open problems)",
+            again.getvalue(),
+        )
 
     def test_summary_includes_result_and_open_problem_totals(self):
         with (
