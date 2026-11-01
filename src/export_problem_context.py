@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Export the context a solve run would get, for work outside the solver.
+"""Export the context a pipeline run would get, for work outside the pipeline.
 
     python src/export_problem_context.py PAPER/OP-ID --output DIR [--replace]
+    python src/export_problem_context.py PAPER/OP-ID/attempt-NNN --task review \
+        --output DIR [--blind]
+    python src/export_problem_context.py PAPER/OP-ID --task literature --output DIR
 
-DIR receives `inputs/` (paper, analysis, attempt history with critiques, and
-the current triage and literature report, staged exactly as for a solve run),
-`TASK.md` (the solver's instructions with this problem's research guidance),
-the result schema, a README, and `context.json`, which records what the export
-was based on so that import_attempt.py can tell whether attempts were added in
-the meantime.  Nothing here runs an agent.
+DIR receives `inputs/` (staged exactly as for the solve run, critic or
+literature search), `TASK.md` (that run's instructions), the result schema, a
+README, and `context.json`, which records what the export was based on so that
+the matching import (import_attempt.py, import_review.py,
+import_literature.py) can tell whether the problem changed in the meantime.
+Nothing here runs an agent.
 """
 
 from __future__ import annotations
@@ -20,7 +23,9 @@ import shutil
 import sys
 
 import codex_cli
+import literature_review
 import open_problem_common as common
+import review_solutions
 import solve_open_problems
 
 
@@ -38,6 +43,21 @@ agent-result.json into the directory you later import from (see README.md);
 everything else applies unchanged. -->
 
 """
+REVIEW_PREAMBLE = """\
+<!-- Exported by export_problem_context.py. This is the task a Loose Ends
+critic receives for this attempt. Outside the pipeline, write critique.md and
+agent-result.json into the directory you later import from (see README.md);
+everything else applies unchanged. -->
+
+"""
+LITERATURE_PREAMBLE = """\
+<!-- Exported by export_problem_context.py. This is the task a Loose Ends
+literature search receives for this problem. Outside the pipeline, write
+agent-result.json and literature-{problem_id}.md into the directory you later
+import from (see README.md); everything else applies unchanged. -->
+
+"""
+CRITIQUE_FILES = ("critique.md", "review-result.json", "review-manifest.json")
 
 
 def resolve_problem(path: Path) -> common.ProblemRef:
@@ -178,12 +198,187 @@ def export_context(
     return record
 
 
+def resolve_attempt(path: Path) -> review_solutions.AttemptRef:
+    """Return the one attempt named by a PAPER/OP-ID/attempt-NNN path."""
+    paths, _, attempts = common.direct_review_inputs([path])
+    if len(attempts) != 1:
+        raise common.CodexError(f"{path} is not a PAPER/OP-ID/attempt-NNN path")
+    _, problem_id, attempt_name = next(iter(attempts))
+    problems = [
+        problem for problem in common.discover_problem_refs(paths)
+        if problem.id == problem_id
+    ]
+    found = review_solutions.discover_attempt_refs(problems, attempt_names={attempt_name})
+    if len(found) != 1:
+        raise common.CodexError(f"{path} does not name exactly one attempt")
+    return found[0]
+
+
+def _prepare_output(output: Path, replace: bool) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    existing = [name for name in GENERATED if (output / name).exists()]
+    if existing:
+        if not replace:
+            raise common.CodexError(
+                f"{output} already holds an exported context "
+                f"({', '.join(existing)}); pass --replace to refresh it"
+            )
+        shutil.rmtree(output / "inputs", ignore_errors=True)
+        for name in GENERATED[1:]:
+            (output / name).unlink(missing_ok=True)
+
+
+def _hide_critiques(history: Path) -> None:
+    """Blind review: remove every critique, the pipeline's and the extra ones."""
+    for path in history.rglob("*"):
+        if path.is_file() and (
+            path.name in CRITIQUE_FILES
+            or path.name.startswith(common.EXTRA_REVIEW_PREFIX)
+        ):
+            path.unlink()
+
+
+def export_review_context(
+    attempt: review_solutions.AttemptRef,
+    output: Path,
+    *,
+    blind: bool = False,
+    replace: bool = False,
+) -> dict:
+    """Stage what Loose Ends' critic sees for one attempt."""
+    _prepare_output(output, replace)
+    problem = attempt.problem
+    common.stage_context(
+        output, [problem], include_paper=True, include_history=True,
+        include_triage=True, include_literature=False,
+        exclude_review_for=attempt.directory,
+    )
+    if blind:
+        _hide_critiques(output / "inputs" / "history")
+    claims = attempt.solver_result.get("checkable_claims") or []
+    claim_ids = [claim["id"] for claim in claims if isinstance(claim, dict) and "id" in claim]
+    inputs = output / "inputs"
+    task = review_solutions.render_prompt(
+        review_solutions.DEFAULT_PROMPT_PATH.read_text(encoding="utf-8"),
+        attempt=attempt,
+        context_directory=inputs,
+    )
+    task = task.replace(
+        codex_cli.path_for_codex(inputs / "history" / problem.id / attempt.name),
+        f"`inputs/history/{problem.id}/{attempt.name}`",
+    ).replace(codex_cli.path_for_codex(inputs), "`inputs/` next to this file")
+    (output / TASK_FILE).write_text(REVIEW_PREAMBLE + task, encoding="utf-8")
+    schema = review_solutions.write_attempt_review_schema(
+        review_solutions.DEFAULT_SCHEMA_PATH, output, attempt
+    )
+    schema.replace(output / SCHEMA_FILE)
+    record = {
+        "schema_version": CONTEXT_SCHEMA_VERSION,
+        "task": "review",
+        "exported_at": common.utc_now(),
+        "problem_id": problem.id,
+        "problem_title": problem.title,
+        "paper_directory": problem.paper_directory.name,
+        "paper_title": problem.paper_title,
+        "attempt": attempt.name,
+        "attempt_digest": common.solver_attempt_digest(attempt.directory),
+        "claim_ids": claim_ids,
+        "claimed_result_type": common.claimed_result_type(attempt.solver_result),
+        "blind": blind,
+    }
+    (output / README_FILE).write_text(f"""# Review of {problem.id}/{attempt.name}: {problem.title}
+
+From *{problem.paper_title}* (`{problem.paper_directory.name}`), exported
+{record["exported_at"]}{" as a blind review: every earlier critique is removed" if blind else ""}.
+This is what Loose Ends' critic sees for this attempt: `inputs/` (paper,
+analysis, the attempt under `inputs/history/{problem.id}/{attempt.name}/`,
+earlier attempts with their critiques, triage) and `{TASK_FILE}`, the critic's
+instructions. The attempt's own critique is left out on purpose.
+
+Write `critique.md` and `agent-result.json` (structure:
+`{SCHEMA_FILE}`; one claim review for each of {", ".join(claim_ids) or "no claims"})
+into a directory of their own, then validate and file them with:
+
+```sh
+python src/import_review.py <paper directory>/{problem.id}/{attempt.name} --from DIR \\
+    --context {CONTEXT_FILE} --output REVIEW-DIRECTORY --person NAME --agent claude --model MODEL
+```
+
+The import refuses the review if the attempt changed after this export.
+""", encoding="utf-8")
+    common.write_json(output / CONTEXT_FILE, record)
+    return record
+
+
+def export_literature_context(
+    problem: common.ProblemRef,
+    output: Path,
+    *,
+    replace: bool = False,
+) -> dict:
+    """Stage what Loose Ends' literature search sees for one problem."""
+    _prepare_output(output, replace)
+    common.stage_context(output, [problem], include_paper=True, include_history=True)
+    inputs = output / "inputs"
+    task = literature_review.render_prompt(
+        literature_review.DEFAULT_PROMPT_PATH.read_text(encoding="utf-8"),
+        problems=[problem],
+        context_directory=inputs,
+    ).replace(codex_cli.path_for_codex(inputs), "`inputs/` next to this file")
+    (output / TASK_FILE).write_text(
+        LITERATURE_PREAMBLE.replace("{problem_id}", problem.id) + task, encoding="utf-8"
+    )
+    schema = literature_review.write_literature_schema(
+        literature_review.DEFAULT_SCHEMA_PATH, output, [problem]
+    )
+    schema.replace(output / SCHEMA_FILE)
+    record = {
+        "schema_version": CONTEXT_SCHEMA_VERSION,
+        "task": "literature",
+        "exported_at": common.utc_now(),
+        "problem_id": problem.id,
+        "problem_title": problem.title,
+        "paper_directory": problem.paper_directory.name,
+        "paper_title": problem.paper_title,
+        "input_digest": common.literature_input_digest(problem),
+    }
+    (output / README_FILE).write_text(f"""# Literature search for {problem.id}: {problem.title}
+
+From *{problem.paper_title}* (`{problem.paper_directory.name}`), exported
+{record["exported_at"]}. This is what Loose Ends' literature search sees:
+`inputs/` (paper, analysis, attempts) and `{TASK_FILE}`, its instructions.
+Use web search; inspect primary sources before relying on them.
+
+Write `agent-result.json` (structure: `{SCHEMA_FILE}`, one entry for
+{problem.id}) and `literature-{problem.id}.md` into a directory of their own,
+then validate and install them with:
+
+```sh
+python src/import_literature.py <paper directory>/{problem.id} --from DIR \\
+    --context {CONTEXT_FILE} --person NAME --agent claude --model MODEL
+```
+""", encoding="utf-8")
+    common.write_json(output / CONTEXT_FILE, record)
+    return record
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("problem", type=Path, help="PAPER/OP-ID path")
+    parser.add_argument(
+        "problem", type=Path,
+        help="PAPER/OP-ID path (PAPER/OP-ID/attempt-NNN with --task review)",
+    )
+    parser.add_argument(
+        "--task", choices=("solve", "review", "literature"), default="solve",
+        help="which pipeline run's context to export (default: solve)",
+    )
+    parser.add_argument(
+        "--blind", action="store_true",
+        help="review: also remove every earlier critique of the problem",
+    )
     parser.add_argument(
         "-o", "--output", type=Path, required=True, help="directory to export into"
     )
@@ -200,8 +395,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        problem = resolve_problem(args.problem)
         output = args.output.expanduser().resolve()
+        if args.task == "review":
+            attempt = resolve_attempt(args.problem)
+            export_review_context(attempt, output, blind=args.blind, replace=args.replace)
+            print(f"Exported the critic's context for {attempt.problem.id}/{attempt.name} "
+                  f"to {output}.")
+            return 0
+        problem = resolve_problem(args.problem)
+        if args.task == "literature":
+            export_literature_context(problem, output, replace=args.replace)
+            print(f"Exported the literature search context for {problem.id} to {output}.")
+            return 0
         record = export_context(problem, output, replace=args.replace)
     except (common.CodexError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         return codex_cli.report_error(parser, exc)

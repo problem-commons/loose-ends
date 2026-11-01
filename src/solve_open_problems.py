@@ -1361,6 +1361,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
         problems = common.filter_exact_problems(problems, exact)
+        problems = common.drop_skipped(problems, exact, "solving")
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
         prompt_template = prompt_path.read_text(encoding="utf-8")

@@ -9,6 +9,7 @@ from functools import lru_cache
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import re
 import shutil
@@ -18,6 +19,7 @@ from typing import Iterable, Sequence
 import analyze_papers
 from artifact_reporting import ARTIFACT_LOG_ENV, report_artifacts
 import codex_cli
+import workbench_organize
 from validation import common as validation_common
 
 
@@ -56,6 +58,13 @@ CLAIMED_RESULT_TYPES = (
     "counterexample",
 )
 CodexError = codex_cli.CodexError
+# Material a project keeps about a problem outside Loose Ends' own files, for
+# example further reviews and human judgements: <paper>/.extra-history/<OP>/
+# holds problem-level files and attempt-NNN/ subdirectories. Staging adds
+# them to inputs/history/<OP>/ so that agents see them with the attempts.
+# Review files there are named extra-review-*.md (hidden by blind reviews).
+EXTRA_HISTORY_DIRECTORY = ".extra-history"
+EXTRA_REVIEW_PREFIX = "extra-review-"
 
 
 @dataclass(frozen=True)
@@ -215,6 +224,49 @@ def filter_exact_problems(
             + ", ".join(missing)
         )
     return selected
+
+
+def drop_skipped(
+    problems: Iterable[ProblemRef],
+    explicit: set[tuple[str, str]],
+    command: str,
+) -> list[ProblemRef]:
+    """Leave out problems a skip label excludes; refuse explicitly named ones.
+
+    Skip labels come from the files in LOOSE_ENDS_LABELS (workbench_organize).
+    """
+    problems = list(problems)
+    paths = workbench_organize.environment_label_paths()
+    if not paths:
+        return problems
+    labels: list[workbench_organize.Label] = []
+    for path in paths:
+        found, errors = workbench_organize.read_labels(path)
+        labels.extend(found)
+        for error in errors:
+            print(f"warning: {error}", file=sys.stderr)
+    kept: list[ProblemRef] = []
+    skipped: list[str] = []
+    for problem in problems:
+        reason = workbench_organize.skip_reason(labels, problem.paper_directory, problem.id)
+        if reason is None:
+            kept.append(problem)
+            continue
+        name = f"{problem.paper_directory.name}/{problem.id}"
+        if (os.path.normcase(str(problem.paper_directory)), problem.id) in explicit:
+            raise CodexError(
+                f"{name} is excluded ({reason}); remove the exclusion before "
+                f"{command} it"
+            )
+        skipped.append(name)
+    if skipped:
+        print(
+            f"Leaving out {len(skipped)} excluded problem(s): {', '.join(skipped)}",
+            file=sys.stderr,
+        )
+    if problems and not kept:
+        raise CodexError("every selected problem is excluded")
+    return kept
 
 
 def paper_runs_directory(paper_directory: Path) -> Path:
@@ -707,6 +759,34 @@ def _copy_attempt_history(
         _copy_file(source, destination / relative)
 
 
+def _copy_extra_history(
+    problem: ProblemRef,
+    destination: Path,
+    *,
+    exclude_review_for: Path | None = None,
+) -> None:
+    source = problem.paper_directory / EXTRA_HISTORY_DIRECTORY / problem.id
+    if not source.is_dir():
+        return
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(source)
+        if len(relative.parts) > 1:
+            attempt = relative.parts[0]
+            if (
+                not ATTEMPT_DIRECTORY_RE.fullmatch(attempt)
+                or not (problem.directory / attempt).is_dir()
+            ):
+                continue
+            if exclude_review_for is not None and attempt == exclude_review_for.name:
+                continue
+        target = destination / relative
+        if target.exists():
+            continue  # never shadow Loose Ends' own records
+        _copy_file(path, target)
+
+
 def stage_context(
     workspace: Path,
     problems: Sequence[ProblemRef],
@@ -760,6 +840,11 @@ def stage_context(
             destination = inputs / "history" / problem.id
             destination.mkdir(parents=True, exist_ok=True)
             _copy_attempt_history(
+                problem,
+                destination,
+                exclude_review_for=exclude_review_for,
+            )
+            _copy_extra_history(
                 problem,
                 destination,
                 exclude_review_for=exclude_review_for,

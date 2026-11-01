@@ -922,6 +922,43 @@ it, triage becomes stale and can suggest next directions, later solve runs
 build on it, and the workbench labels it *interactive* or *project*. Review it
 with an agent other than the one that produced it.
 
+Reviews and literature searches work the same way:
+
+```sh
+python src/export_problem_context.py papers/.../OP-001/attempt-002 --task review \
+  --output ~/work/review [--blind]
+python src/import_review.py papers/.../OP-001/attempt-002 --from ~/work/review-result \
+  --context ~/work/review/context.json --output ~/project/reviews/... \
+  --person NAME --agent claude --model opus
+python src/export_problem_context.py papers/.../OP-001 --task literature --output ~/work/lit
+python src/import_literature.py papers/.../OP-001 --from ~/work/lit-result \
+  --context ~/work/lit/context.json --person NAME --agent claude
+```
+
+A review export stages exactly what the critic sees (without the attempt's own
+critique; `--blind` removes all earlier critiques) with the critic's
+instructions and a schema restricted to the attempt's claims. The import
+validates `critique.md` and `agent-result.json` like a critic result and writes
+them, with a manifest naming the origin, to a new directory of the project's
+choosing: an outside review is an additional review and never replaces the
+attempt's own critique. A literature import validates like a literature run and
+installs the report into the problem directory (`--force` replaces a current
+one).
+
+Material a project keeps about a problem outside these files, such as further
+reviews or human judgements, can be placed in `<paper>/.extra-history/OP-001/`
+(problem-level files, and `attempt-NNN/` subdirectories for existing attempts).
+Every run that stages the attempt history (solve, triage, critic, literature,
+exports) copies it into `inputs/history/` next to the attempts; it never
+shadows Loose Ends' own files, the critic does not see extra material about the
+attempt under review, and blind reviews remove files named `extra-review-*`.
+
+Labels (see the workbench) with `"skip": true` keep triage, literature search
+and solving away from a problem when their file is named in
+`LOOSE_ENDS_LABELS` (several separated by `:`, or `;` on Windows): such
+problems are left out of paper or folder selections with a note, and naming one
+directly is an error. The workbench passes the variable on to its tasks.
+
 ## Write a paper
 
 `src/write_paper.py` composes one deliberate research-paper manuscript from
