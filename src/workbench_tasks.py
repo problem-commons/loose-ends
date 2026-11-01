@@ -72,6 +72,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
         parser = module.build_parser()
         destinations = {argument.dest for argument in parser._actions}
         values = {
+            "agent": parser.get_default("agent"),
             "model": parser.get_default("model"),
             "reasoningEffort": parser.get_default("reasoning_effort"),
         }

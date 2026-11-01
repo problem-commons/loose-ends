@@ -25,13 +25,24 @@ from codex_transcripts import record_transcript
 
 REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 WEB_SEARCH_MODES = ("disabled", "indexed", "live")
-DEFAULT_MODEL = "gpt-6-astra"
+# GPT-6.1 Sol is close to Astra at a fifth of its price; Astra stays one
+# explicit --model away.
+DEFAULT_MODEL = "gpt-6.1-sol"
 DEFAULT_REASONING_EFFORT = "xhigh"
-# Agent CLIs that can perform a structured turn.  Codex is the default and the
-# reference implementation; Claude Code is an alternative backend that follows
-# the same workspace, prompt, and in-turn validation contract.
+# Agent CLIs that can perform a structured turn.  Codex is the reference
+# implementation; Claude Code is an alternative backend that follows the same
+# workspace, prompt, and in-turn validation contract.  DEFAULT_AGENT is the
+# reference identity used in digests and manifests; the agent a command uses
+# when none is requested can be changed per person with LOOSE_ENDS_AGENT.
 AGENTS = ("codex", "claude")
 DEFAULT_AGENT = "codex"
+# Per-person defaults for primary runs, e.g. LOOSE_ENDS_AGENT=claude and
+# LOOSE_ENDS_MODEL=opus for someone who works with Claude.  LOOSE_ENDS_MODEL
+# applies to the default agent only, so an explicit --agent never receives a
+# model from the other vendor.
+AGENT_ENV = "LOOSE_ENDS_AGENT"
+MODEL_ENV = "LOOSE_ENDS_MODEL"
+REASONING_EFFORT_ENV = "LOOSE_ENDS_REASONING_EFFORT"
 CLAUDE_EXECUTABLE_ENV = "LOOSE_ENDS_CLAUDE"
 CLAUDE_SETTING_SOURCES_ENV = "LOOSE_ENDS_CLAUDE_SETTING_SOURCES"
 # Claude Code has no separate "ultra" level; map it to the deepest one.
@@ -319,6 +330,47 @@ def with_user_prompt(
     )
 
 
+def _environment_choice(name: str, choices: tuple[str, ...]) -> str | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    if value not in choices:
+        print(
+            f"Ignoring {name}={value!r}; expected one of {', '.join(choices)}.",
+            file=sys.stderr,
+        )
+        return None
+    return value
+
+
+def default_agent() -> str:
+    """The agent used when a command requests none (LOOSE_ENDS_AGENT)."""
+    return _environment_choice(AGENT_ENV, AGENTS) or DEFAULT_AGENT
+
+
+def default_model(agent: str | None = None) -> str | None:
+    """The model used for `agent` when none is requested.
+
+    LOOSE_ENDS_MODEL belongs to the default agent.  Otherwise Codex uses
+    DEFAULT_MODEL and Claude Code its own configured default (None).
+    """
+    agent = agent or default_agent()
+    configured = os.environ.get(MODEL_ENV, "").strip()
+    if configured and agent == default_agent():
+        return configured
+    return DEFAULT_MODEL if agent == "codex" else None
+
+
+def reasoning_effort_default(stage_default: str | None = None) -> str:
+    """A stage's own default wins; otherwise LOOSE_ENDS_REASONING_EFFORT."""
+    if stage_default is not None:
+        return stage_default
+    return (
+        _environment_choice(REASONING_EFFORT_ENV, REASONING_EFFORTS)
+        or DEFAULT_REASONING_EFFORT
+    )
+
+
 def add_model_arguments(
     parser: argparse.ArgumentParser,
     *,
@@ -333,11 +385,14 @@ def add_model_arguments(
         raise ValueError(f"invalid default reasoning effort: {default_reasoning_effort}")
     option_prefix = f"{prefix}-" if prefix else ""
     destination_prefix = f"{prefix.replace('-', '_')}_" if prefix else ""
-    model_default = None if prefix else DEFAULT_MODEL
-    primary_reasoning_default = default_reasoning_effort or DEFAULT_REASONING_EFFORT
+    primary_agent_default = default_agent()
+    model_default = None if prefix else default_model(primary_agent_default)
+    primary_reasoning_default = reasoning_effort_default(default_reasoning_effort)
     reasoning_default = None if prefix else primary_reasoning_default
     model_default_help = (
-        "inherit the primary run" if prefix else DEFAULT_MODEL
+        "inherit the primary run"
+        if prefix
+        else model_default or "the Claude Code default model"
     )
     reasoning_default_help = (
         "inherit the primary run" if prefix else primary_reasoning_default
@@ -345,13 +400,14 @@ def add_model_arguments(
     parser.add_argument(
         f"--{option_prefix}agent",
         dest=f"{destination_prefix}agent",
-        default=None if prefix else DEFAULT_AGENT,
+        default=None if prefix else primary_agent_default,
         choices=AGENTS,
         metavar="AGENT",
         help=(
             "agent CLI that performs the turn: codex or claude (Claude Code; "
             "requires Linux, macOS, or WSL2 for its sandbox) "
-            f"(default: {'inherit the primary run' if prefix else DEFAULT_AGENT})"
+            f"(default: {'inherit the primary run' if prefix else primary_agent_default}"
+            f"{'' if prefix else '; set ' + AGENT_ENV + ' to change'})"
         ),
     )
     parser.add_argument(
@@ -360,9 +416,10 @@ def add_model_arguments(
         default=model_default,
         metavar="MODEL",
         help=(
-            "model ID; for example, gpt-5.6-sol for Codex or opus for Claude "
-            f"Code (default: {model_default_help}; with --{option_prefix}agent "
-            "claude, the Claude Code default model)"
+            "model ID; for example, gpt-6.1-sol for Codex or opus for Claude "
+            f"Code (default: {model_default_help}"
+            + ("" if prefix else f"; set {MODEL_ENV} to change")
+            + f"; another --{option_prefix}agent uses its own default model)"
         ),
     )
     parser.add_argument(
@@ -433,10 +490,13 @@ def model_options_from_args(
     model = getattr(args, f"{destination_prefix}model")
     fast = getattr(args, f"{destination_prefix}fast")
     ultrafast = getattr(args, f"{destination_prefix}ultrafast", False)
+    if not prefix and agent != default_agent() and model == default_model():
+        # The parser's default model belongs to the default agent; an
+        # explicitly different agent uses its own default instead.
+        model = default_model(agent)
     if agent is not None and agent != "codex":
         if model == DEFAULT_MODEL:
-            # The parser's default model is a Codex model; let Claude Code
-            # use its own default unless a model was requested explicitly.
+            # A Codex model never reaches Claude Code implicitly.
             model = None
         if fast or ultrafast:
             raise CodexError(
@@ -473,7 +533,7 @@ def inherit_model_options(
     elif same_agent:
         model = primary.model
     else:
-        model = DEFAULT_MODEL if (agent or DEFAULT_AGENT) == "codex" else None
+        model = default_model(agent or DEFAULT_AGENT)
     fast = secondary.fast or (primary.fast and not secondary.ultrafast)
     ultrafast = secondary.ultrafast or (primary.ultrafast and not secondary.fast)
     if (agent or DEFAULT_AGENT) != "codex":

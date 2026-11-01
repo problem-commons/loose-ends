@@ -401,5 +401,87 @@ class WorkbenchAndUsageTests(unittest.TestCase):
         self.assertIsNone(workbench_usage.claude_token_usage({"input_tokens": -1}))
 
 
+class PersonalDefaultTests(unittest.TestCase):
+    """LOOSE_ENDS_AGENT/MODEL/REASONING_EFFORT set per-person defaults."""
+
+    def environment(self, **values):
+        names = (
+            codex_cli.AGENT_ENV, codex_cli.MODEL_ENV, codex_cli.REASONING_EFFORT_ENV
+        )
+        clean = {name: "" for name in names}
+        clean.update(values)
+        return patch.dict(os.environ, clean)
+
+    def options(self, argv=(), prefix=""):
+        args = parser_with_model_arguments().parse_args(list(argv))
+        return codex_cli.model_options_from_args(args, prefix=prefix)
+
+    def test_builtin_default_is_codex_with_sol(self):
+        with self.environment():
+            options = self.options()
+        self.assertEqual(codex_cli.DEFAULT_MODEL, "gpt-6.1-sol")
+        self.assertEqual((options.agent_name, options.model), ("codex", "gpt-6.1-sol"))
+        self.assertEqual(options.reasoning_effort, "xhigh")
+
+    def test_claude_person_defaults(self):
+        with self.environment(LOOSE_ENDS_AGENT="claude", LOOSE_ENDS_MODEL="opus"):
+            options = self.options()
+            explicit_codex = self.options(["--agent", "codex"])
+        self.assertEqual((options.agent, options.model), ("claude", "opus"))
+        # The personal model belongs to the personal agent only.
+        self.assertEqual(
+            (explicit_codex.agent, explicit_codex.model), ("codex", "gpt-6.1-sol")
+        )
+
+    def test_model_without_agent_applies_to_codex(self):
+        with self.environment(LOOSE_ENDS_MODEL="gpt-6-astra"):
+            options = self.options()
+            claude = self.options(["--agent", "claude"])
+        self.assertEqual(options.model, "gpt-6-astra")
+        self.assertIsNone(claude.model)
+
+    def test_invalid_values_are_ignored(self):
+        with self.environment(
+            LOOSE_ENDS_AGENT="gemini", LOOSE_ENDS_REASONING_EFFORT="extreme"
+        ), patch("sys.stderr"):
+            options = self.options()
+        self.assertEqual((options.agent_name, options.reasoning_effort), ("codex", "xhigh"))
+
+    def test_effort_default_yields_to_stage_default(self):
+        with self.environment(LOOSE_ENDS_REASONING_EFFORT="high"):
+            self.assertEqual(self.options().reasoning_effort, "high")
+            parser = argparse.ArgumentParser()
+            codex_cli.add_model_arguments(parser, default_reasoning_effort="medium")
+            self.assertEqual(parser.get_default("reasoning_effort"), "medium")
+
+    def test_critic_switching_to_codex_gets_the_codex_default(self):
+        with self.environment(LOOSE_ENDS_AGENT="claude", LOOSE_ENDS_MODEL="opus"):
+            critic = codex_cli.inherit_model_options(
+                codex_cli.ModelOptions("opus", "xhigh", agent="claude"),
+                codex_cli.ModelOptions(agent="codex"),
+            )
+        self.assertEqual(critic.model, "gpt-6.1-sol")
+
+    def test_codex_digests_ignore_the_personal_default(self):
+        # The reference agent stays Codex, so a Codex run's digest is the
+        # same whoever's defaults produced it.
+        with self.environment(LOOSE_ENDS_AGENT="claude"):
+            digest = codex_cli.semantic_config_digest(
+                "p", "{}", codex_cli.ModelOptions("gpt-6.1-sol", "xhigh", agent="codex")
+            )
+        self.assertEqual(
+            digest,
+            codex_cli.semantic_config_digest(
+                "p", "{}", codex_cli.ModelOptions("gpt-6.1-sol", "xhigh")
+            ),
+        )
+
+    def test_workbench_shows_personal_defaults(self):
+        with self.environment(LOOSE_ENDS_AGENT="claude", LOOSE_ENDS_MODEL="opus"):
+            defaults = workbench_tasks.task_cli_defaults()
+        self.assertEqual(defaults["solve"]["agent"], "claude")
+        self.assertEqual(defaults["solve"]["model"], "opus")
+
+
 if __name__ == "__main__":
     unittest.main()

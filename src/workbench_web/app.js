@@ -4994,11 +4994,12 @@ function renderTaskConfiguration(errorMessage = "") {
   const taskDefaults = state.settings.taskDefaults?.[task.action] || {};
   advancedGrid.append(field("agent", "Agent", {
     type: "select", value: options.agent || "",
-    options: [["", "Default (Codex)"], ["codex", "Codex"], ["claude", "Claude Code (needs Linux/WSL2)"]],
+    options: [["", `Default (${taskDefaults.agent === "claude" ? "Claude Code" : "Codex"})`], ["codex", "Codex"], ["claude", "Claude Code (needs Linux/WSL2)"]],
     help: "With Claude Code, a blank model uses Claude Code's default model, and the speed tier must stay Standard.",
   }));
   advancedGrid.append(modelField(
-    "model", "Model", options.model, `Default (${taskDefaults.model || "unavailable"})`,
+    "model", "Model", options.model,
+    `Default (${taskDefaults.model || (taskDefaults.agent === "claude" ? "Claude Code's default" : "unavailable")})`,
   ));
   advancedGrid.append(field("reasoningEffort", "Reasoning effort", {
     type: "select", value: options.reasoningEffort || "",

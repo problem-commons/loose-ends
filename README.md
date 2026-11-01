@@ -470,8 +470,16 @@ python src/analyze_papers.py papers/edemaine --jobs 4
 
 The default is one agent at a time. Start with modest concurrency because every
 job consumes Codex capacity independently. All Codex-backed scripts default to
-`--model gpt-6-astra --reasoning-effort xhigh`; use either option to override
-that choice, or `--force` to regenerate a current analysis.
+`--model gpt-6.1-sol --reasoning-effort xhigh` (GPT-6 Astra is close in quality
+at about five times the price; request it with `--model gpt-6-astra`). Use either
+option to override that choice; see "Choosing the agent" for per-person defaults.
+
+An installed analysis is kept even when a new paper version, prompt, or model
+setting has made it stale: re-analysis assigns `OP-###` numbers afresh, while
+triage, literature reports, attempts, and any records kept beside the paper
+tree refer to the installed numbers. Pass `--reanalyze` to redo stale analyses
+deliberately, or `--force` to redo current ones as well. A dry run lists kept
+analyses as `Would keep`.
 Parallel jobs are started one second apart to avoid Windows CLI startup races;
 after startup, their paper analyses run concurrently. Pre-thread Windows
 path-startup failures are retried up to twice.
@@ -1245,6 +1253,21 @@ python src/solve_open_problems.py papers/edemaine --from-triage attempt \
 
 The workbench offers the same choice as **Agent** and **Critic agent** under
 **Model and web-search settings**.
+
+Each person can set their own defaults once, for example in `~/.bashrc`, so
+that commands and workbench dialogs use them whenever no agent or model is
+chosen:
+
+```sh
+export LOOSE_ENDS_AGENT=claude         # or codex (the built-in default)
+export LOOSE_ENDS_MODEL=opus           # model for that default agent
+export LOOSE_ENDS_REASONING_EFFORT=high  # optional; stages with their own default keep it
+```
+
+`LOOSE_ENDS_MODEL` applies to the default agent only: an explicit `--agent`
+of the other vendor uses that vendor's default model. Configuration digests
+and manifests are unaffected, because they record the agent and model a run
+actually used.
 
 The Claude Code agent follows the same contract as Codex: it receives the same
 prompt and staged read-only inputs, writes `agent-result.json`, and runs
