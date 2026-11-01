@@ -774,6 +774,7 @@ def _install_attempt(
             "config_digest": config_digest,
             "codex_version": codex_version,
             "requested_model": options.model,
+            **codex_cli.agent_provenance(options),
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
             "requested_service_tier": options.service_tier,
@@ -843,6 +844,7 @@ def _write_work_record(
             "config_digest": config_digest,
             "codex_version": codex_version,
             "requested_model": options.model,
+            **codex_cli.agent_provenance(options),
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
             "requested_service_tier": options.service_tier,
@@ -1108,12 +1110,7 @@ def _inherit_review_options(
     solver_options: codex_cli.ModelOptions,
     review_options: codex_cli.ModelOptions,
 ) -> codex_cli.ModelOptions:
-    return codex_cli.ModelOptions(
-        review_options.model or solver_options.model,
-        review_options.reasoning_effort or solver_options.reasoning_effort,
-        review_options.fast or (solver_options.fast and not review_options.ultrafast),
-        review_options.ultrafast or (solver_options.ultrafast and not review_options.fast),
-    )
+    return codex_cli.inherit_model_options(solver_options, review_options)
 
 
 def review_confirms_resolution(
@@ -1469,9 +1466,12 @@ def main(argv: list[str] | None = None) -> int:
         return codex_cli.report_error(parser, exc)
     agent_count = min(args.jobs, len(work_items))
     if agent_count == 1:
-        concurrency = "sequentially with 1 Codex agent"
+        concurrency = f"sequentially with 1 {codex_cli.agent_display_name(options)} agent"
     else:
-        concurrency = f"with up to {agent_count} concurrent Codex agents"
+        concurrency = (
+            f"with up to {agent_count} concurrent "
+            f"{codex_cli.agent_display_name(options)} agents"
+        )
     round_phrase = (
         "one round"
         if args.max_rounds == 1

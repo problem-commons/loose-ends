@@ -395,6 +395,11 @@ def _common_arguments(
 ) -> None:
     if prompt and (value := _text(options, "prompt")) is not None:
         argv.extend(("--prompt", value))
+    agent = options.get("agent")
+    if agent:
+        if agent not in codex_cli.AGENTS:
+            raise PlanError("invalid agent")
+        argv.extend(("--agent", agent))
     if value := _text(options, "model"):
         argv.extend(("--model", value))
     effort = options.get("reasoningEffort")
@@ -418,6 +423,11 @@ def _common_arguments(
 def _review_arguments(argv: list[str], options: dict) -> None:
     if value := _text(options, "reviewPrompt"):
         argv.extend(("--review-prompt", value))
+    agent = options.get("reviewAgent")
+    if agent:
+        if agent not in codex_cli.AGENTS:
+            raise PlanError("invalid review agent")
+        argv.extend(("--review-agent", agent))
     if value := _text(options, "reviewModel"):
         argv.extend(("--review-model", value))
     effort = options.get("reviewReasoningEffort")

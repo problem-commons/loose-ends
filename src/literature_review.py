@@ -455,6 +455,7 @@ def _install_literature(
             ),
             "codex_version": codex_version,
             "requested_model": options.model,
+            **codex_cli.agent_provenance(options),
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
             "requested_service_tier": options.service_tier,
@@ -523,6 +524,7 @@ def _write_work_record(
             "config_digest": config_digest,
             "codex_version": codex_version,
             "requested_model": options.model,
+            **codex_cli.agent_provenance(options),
             "requested_reasoning_effort": options.reasoning_effort,
             "requested_fast_mode": options.fast,
             "requested_service_tier": options.service_tier,
@@ -974,7 +976,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"Searching literature for {len(stale)} stale problem(s) from "
             f"{len(grouped)} paper(s), with up to "
-            f"{min(args.jobs, len(grouped))} Codex agent(s) at once "
+            f"{min(args.jobs, len(grouped))} "
+            f"{codex_cli.agent_display_name(options)} agent(s) at once "
             f"({args.web_search} web search)."
         )
         with ThreadPoolExecutor(
