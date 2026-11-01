@@ -201,6 +201,7 @@ button { color: inherit; }
 .attempt-tag.claim { background: var(--accent-soft); color: var(--accent); }
 .attempt-tag.status { background: var(--medium-bg); color: var(--medium); }
 .attempt-tag.known { background: var(--known-bg); color: var(--known); }
+.attempt-tag.origin, .badge.origin { background: var(--orange-soft); color: var(--orange); }
 
 .eyebrow { color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .15em; text-transform: uppercase; }
 .inline-markdown .katex { letter-spacing: normal; text-transform: none; }

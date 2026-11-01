@@ -332,3 +332,24 @@ test("sort controls also request selection visibility and preserve the detail sc
     select.handlers.change();
   }
 });
+
+test("attempts made outside the solver show where they came from", () => {
+  const base = { attemptStatus: "unreviewed", claimedResultType: "partial_result", solverSummary: "Progress." };
+  const interactive = {
+    ...base,
+    attemptOrigin: { kind: "interactive", people: ["kbuchin"], agents: ["claude"], models: ["opus"], session: "sessions/s1" },
+  };
+  const tag = reviewModel.attemptTags(interactive).find(value => value.dimension === "origin");
+  assert.equal(tag.label, "interactive");
+  assert.match(tag.title, /interactive session by kbuchin with claude, opus/);
+  assert.equal(
+    reviewModel.detailBadges(interactive).find(value => value.dimension === "origin").label,
+    "interactive · kbuchin",
+  );
+  assert.equal(reviewModel.summaryCards(interactive)[0].title, "Interactive claim · partial result");
+  const external = { ...base, attemptOrigin: { kind: "external", people: ["kbuchin"], source: "https://example.org/r@abc" } };
+  assert.match(reviewModel.attemptTags(external).find(value => value.dimension === "origin").title, /example\.org\/r@abc/);
+  assert.equal(reviewModel.summaryCards(external)[0].title, "Project claim · partial result");
+  assert.equal(reviewModel.attemptTags(base).some(value => value.dimension === "origin"), false);
+  assert.equal(reviewModel.summaryCards(base)[0].title, "Solver claim · partial result");
+});

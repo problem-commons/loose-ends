@@ -539,6 +539,8 @@
       }
     }
     if (includeKnown && item.literatureStatus === "resolved") values.push(["known", "known"]);
+    const origin = originLabel(item);
+    if (origin) values.push(["origin", item.attemptOrigin.kind, origin.short]);
     if (item.claimedResultType) values.push(["claim", item.claimedResultType]);
     if (item.attemptStatus === "reviewed") {
       values.push(
@@ -565,11 +567,39 @@
         : humanize(value)),
       title: dimension === "source" ? `Relation to source paper: ${humanize(value)}`
         : dimension === "attempts" ? `Total solution attempts for this problem: ${value}`
+        : dimension === "origin" ? originLabel(item).long
         : value === "legacy" ? "This review predates the separate correctness, coverage, and importance assessments"
         : dimension === "status" ? `Solution attempt: ${humanize(value)}`
         : `${dimension}: ${humanize(value)}`,
-      className: ["claim", "status", "known"].includes(dimension) ? dimension : "",
+      className: ["claim", "status", "known", "origin"].includes(dimension) ? dimension : "",
     }));
+  }
+
+  // Attempts installed by import_attempt.py: made in an interactive session
+  // or in a separate project, not by a solver run.
+  function originLabel(item) {
+    const origin = item.attemptOrigin;
+    if (!origin || !origin.kind) return null;
+    const list = values => (Array.isArray(values) ? values.filter(Boolean) : []);
+    const people = list(origin.people).join(", ");
+    const tools = [...list(origin.agents), ...list(origin.models)].join(", ");
+    const who = [people, tools].filter(Boolean).join(" with ");
+    const short = { external: "project", interactive: "interactive" }[origin.kind] || humanize(origin.kind);
+    const badge = `${short}${people ? ` · ${people}` : ""}`;
+    const heading = { external: "Project", interactive: "Interactive" }[origin.kind] || "Imported";
+    if (origin.kind === "external") {
+      return {
+        short, badge, heading,
+        long: `Imported from a separate project${origin.source ? ` (${origin.source})` : ""}${who ? ` · ${who}` : ""}`,
+      };
+    }
+    if (origin.kind === "interactive") {
+      return {
+        short, badge, heading,
+        long: `Made in an interactive session${who ? ` by ${who}` : ""}${origin.session ? ` · ${origin.session}` : ""}`,
+      };
+    }
+    return { short, badge, heading, long: `Attempt origin: ${humanize(origin.kind)}` };
   }
 
   function detailBadges(item) {
@@ -587,6 +617,8 @@
       values.push(["status", item.attemptStatus, statusLabel(item.attemptStatus)]);
       if (item.claimedResultType) values.push(["claim", item.claimedResultType, item.claimedResultType]);
     }
+    const origin = originLabel(item);
+    if (origin) values.push(["origin", item.attemptOrigin.kind, origin.badge]);
     if (item.literatureStatus) {
       values.push(["literature", item.literatureStatus, `literature: ${humanize(item.literatureStatus)}`]);
     }
@@ -614,7 +646,7 @@
     if (item.attemptStatus !== "unattempted") {
       cards.push({
         key: "solver",
-        title: `Solver claim · ${humanize(item.claimedResultType)}`,
+        title: `${originLabel(item)?.heading || "Solver"} claim · ${humanize(item.claimedResultType)}`,
         value: item.solverSummary,
         missing: "No solver summary.",
       });
