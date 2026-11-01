@@ -17,6 +17,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -24,7 +25,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Iterable
+from typing import Iterable, Sequence
 import unicodedata
 from urllib.parse import parse_qs, unquote, urlsplit
 import zipfile
@@ -1539,6 +1540,7 @@ class WorkbenchApplication:
         manuscripts: Path,
         state_directory: Path,
         labels: Iterable[Path] = (),
+        label_command: Sequence[str] = (),
     ):
         self.paths = paths
         self.paper_output_roots = [
@@ -1581,14 +1583,51 @@ class WorkbenchApplication:
         for error in self.labels.errors:
             print(f"warning: {error}", file=sys.stderr)
         self.stars = workbench_organize.StarStore(state_directory)
+        # Runs the label actions declared in the labels files (--label-command).
+        self.label_command = list(label_command)
+        self.label_action_lock = threading.Lock()
         self.catalog.organizer = self.organize
         self.closing = threading.Event()
         self.label_thread: threading.Thread | None = None
 
     def organize(self, value: dict) -> dict:
         return workbench_organize.organize(
-            value, self.catalog.paths, self.labels.current(), self.stars.load()
+            value, self.catalog.paths, self.labels.current(), self.stars.load(),
+            self.labels.current_actions() if self.label_command else (),
         )
+
+    def import_targets(self) -> list[Path]:
+        return workbench_organize.import_targets(self.paper_output_roots)
+
+    def run_label_action(self, request: dict) -> dict:
+        if not self.label_command:
+            raise PlanError("this workbench was started without --label-command")
+        kind, target, key = request.get("kind"), request.get("target"), request.get("key")
+        if kind not in workbench_organize.ACTION_KINDS:
+            raise PlanError("kind must be paper or problem")
+        if not isinstance(target, str) or not target.strip("/ "):
+            raise PlanError("a label action needs a target")
+        if not isinstance(key, str):
+            raise PlanError("a label action needs its key")
+        target = target.strip("/ ")
+        self.labels.refresh()
+        action = self.labels.find_action(key, kind, target)
+        if action is None:
+            raise PlanError("this action is no longer offered; reload the page")
+        try:
+            values = workbench_organize.action_values(action, request.get("values"))
+        except ValueError as exc:
+            raise PlanError(str(exc)) from exc
+        with self.label_action_lock:
+            try:
+                message = workbench_organize.run_label_command(
+                    self.label_command, action, kind, target, values
+                )
+            except RuntimeError as exc:
+                raise PlanError(str(exc)) from exc
+            self.labels.refresh()
+        self.hub.publish("catalog.changed", version=self.catalog.version)
+        return {"message": message}
 
     def _watch_labels(self) -> None:
         while not self.closing.wait(LABEL_POLL_SECONDS):
@@ -1823,8 +1862,10 @@ class WorkbenchApplication:
         if not isinstance(output_value, str) or not output_value:
             raise PlanError("paper collection is required")
         output = Path(output_value).expanduser().resolve()
-        if not any(output == root.resolve() for root in self.paper_output_roots):
-            raise PlanError("paper collection is not a configured paper root")
+        if not any(output == target.resolve() for target in self.import_targets()):
+            raise PlanError(
+                "paper collection is not a configured paper root or one of its collections"
+            )
         input_values = request.get("inputs")
         if not isinstance(input_values, list) or not input_values:
             raise PlanError("at least one PDF, archive, or directory is required")
@@ -2310,6 +2351,11 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                             "paperRoots": [
                                 str(path) for path in self.app.paper_output_roots
                             ],
+                            # Collections first: where added papers may go.
+                            "paperTargets": [
+                                str(path) for path in self.app.import_targets()
+                            ],
+                            "labelCommand": bool(self.app.label_command),
                             "taskDefaults": self.app.task_defaults,
                             "labelErrors": list(self.app.labels.errors),
                         },
@@ -2450,6 +2496,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                 self.send_json(self.app.set_manuscript_pinning(body))
             elif parsed.path == "/api/stars":
                 self.send_json(self.app.set_star(body))
+            elif parsed.path == "/api/label-actions":
+                self.send_json(self.app.run_label_action(body))
             elif match := re.fullmatch(
                 r"/api/jobs/([0-9a-f-]+)/scheduling", parsed.path
             ):
@@ -2851,6 +2899,15 @@ def build_parser() -> argparse.ArgumentParser:
             "exclusions, tags); re-read when it changes; may be repeated"
         ),
     )
+    parser.add_argument(
+        "--label-command",
+        metavar="COMMAND",
+        help=(
+            "command that carries out the label actions declared in the labels "
+            "files (for example adding a tag); it reads one JSON request on "
+            "standard input"
+        ),
+    )
     parser.add_argument("--no-open", action="store_true")
     return parser
 
@@ -2875,6 +2932,10 @@ def main(argv: list[str] | None = None) -> int:
             manuscripts=manuscripts,
             state_directory=state_directory,
             labels=args.labels or workbench_organize.environment_label_paths(),
+            label_command=(
+                shlex.split(args.label_command, posix=os.name != "nt")
+                if args.label_command else ()
+            ),
         )
         app.start_watching()
         server = WorkbenchHTTPServer(

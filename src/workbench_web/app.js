@@ -14,6 +14,8 @@ const state = {
     queueManuallyPaused: false,
     memoryLimit: { mode: "percent", value: 50 },
     paperRoots: [],
+    paperTargets: [],
+    labelCommand: false,
     taskDefaults: {},
   },
   tab: "research",
@@ -1856,6 +1858,111 @@ function starButton(kind, key, starred) {
   return element;
 }
 
+function heroActions(kind, row) {
+  const wrapper = node("div", "hero-actions");
+  wrapper.append(starButton(kind === "paper" ? "papers" : "problems",
+    kind === "paper" ? row.key : row.problemKey, Boolean(row.starred)));
+  if (state.settings.labelCommand && row.labelActions?.length) {
+    const target = kind === "paper" ? row.paperId : `${row.paperId}/${row.problemId}`;
+    const heading = kind === "paper" ? (row.title || row.name) : `${row.problemId}: ${row.problemTitle}`;
+    const edit = button("Labels…", () => openLabelEditor(kind, target, heading, row.labelActions), "button");
+    edit.title = "Tags, exclusions and judgements, written by the project's label command";
+    wrapper.append(edit);
+  }
+  return wrapper;
+}
+
+function labelActionFields(action) {
+  const grid = node("div", "form-grid");
+  (action.fields || []).forEach(item => {
+    const options = item.type === "select" ? item.options : [];
+    const wrapper = field(item.name, `${item.label}${item.required ? "" : " (optional)"}`, {
+      type: item.type, options, value: item.value ?? (options.length ? options[0][0] : ""),
+      help: item.help || "", full: item.type === "textarea",
+    });
+    if (item.type === "text" && item.suggestions?.length) {
+      const list = node("datalist");
+      list.id = `label-suggestions-${item.name}`;
+      item.suggestions.forEach(value => {
+        const option = node("option");
+        option.value = value;
+        list.append(option);
+      });
+      wrapper.querySelector("input").setAttribute("list", list.id);
+      wrapper.append(list);
+    }
+    grid.append(wrapper);
+  });
+  const wrapper = node("div", "label-action");
+  wrapper.append(node("p", "muted", action.title || (action.fields?.length ? "" : "No further input needed.")));
+  if (action.fields?.length) wrapper.append(grid);
+  return wrapper;
+}
+
+function openLabelEditor(kind, target, heading, actions) {
+  state.dialog = { kind: "label-action", target, actionKind: kind, actions, selected: 0 };
+  dialogEyebrow.textContent = target;
+  dialogTitle.textContent = "Labels";
+  renderLabelEditor(heading);
+  showTaskDialog();
+}
+
+function renderLabelEditor(heading) {
+  const editor = state.dialog;
+  dialogBody.replaceChildren();
+  dialogBody.append(node("p", "muted", heading));
+  const chooser = field("labelAction", "Change", {
+    type: "select", value: String(editor.selected),
+    options: editor.actions.map((action, index) => [String(index), action.label]),
+  });
+  chooser.querySelector("select").addEventListener("change", event => {
+    editor.selected = Number(event.target.value);
+    renderLabelEditor(heading);
+  });
+  dialogBody.append(chooser, labelActionFields(editor.actions[editor.selected]));
+  dialogFooter.replaceChildren(
+    button("Cancel", () => dialog.close()),
+    button("Apply", applyLabelAction, "button primary"),
+  );
+}
+
+async function applyLabelAction() {
+  const editor = state.dialog;
+  if (!editor || editor.kind !== "label-action") return;
+  const action = editor.actions[editor.selected];
+  const values = {};
+  dialogBody.querySelectorAll(".form-grid [name]").forEach(input => {
+    values[input.name] = input.value;
+  });
+  dialogFooter.querySelectorAll("button").forEach(value => { value.disabled = true; });
+  try {
+    const result = await api("/api/label-actions", {
+      method: "POST",
+      body: { kind: editor.actionKind, target: editor.target, key: action.key, values },
+    });
+    dialog.close();
+    state.dialog = null;
+    showNotice(result.message || `${action.label}: done`);
+    await refreshCatalog();
+  } catch (error) {
+    dialogFooter.querySelectorAll("button").forEach(value => { value.disabled = false; });
+    dialogBody.querySelector(".error-box")?.remove();
+    dialogBody.prepend(node("div", "error-box", error.message));
+  }
+}
+
+function paperTargetOptions() {
+  const roots = state.settings.paperRoots || [];
+  const targets = state.settings.paperTargets?.length ? state.settings.paperTargets : roots;
+  return targets.map(value => {
+    const root = roots.find(candidate => value !== candidate
+      && (value.startsWith(`${candidate}/`) || value.startsWith(`${candidate}\\`)));
+    const name = value.split(/[\\/]/).filter(Boolean).pop();
+    if (root) return [value, `${root.split(/[\\/]/).filter(Boolean).pop()}/${name}`];
+    return [value, roots.length > 1 || targets.length > 1 ? `${name}/ (root)` : value];
+  });
+}
+
 function renderResearchFilters() {
   const details = node("details", "research-filters");
   details.open = state.researchFiltersOpen;
@@ -2455,7 +2562,7 @@ function renderReviewDetail(item) {
   copy.append(inlineMarkdown("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
   if (item.collection || item.labels?.length) copy.append(labelBadges(item));
-  hero.append(copy, starButton("problems", item.problemKey, Boolean(item.starred)));
+  hero.append(copy, heroActions("problem", item));
   shell.append(hero);
 
   const problem = problemTarget(item);
@@ -2762,7 +2869,7 @@ function renderPapers() {
   if (paper.analyzed) badges.append(badge(`${paper.problemCount} problems`, "neutral"));
   copy.append(badges);
   if (paper.collection || paper.labels?.length) copy.append(labelBadges(paper));
-  hero.append(copy, starButton("papers", paper.key, Boolean(paper.starred)));
+  hero.append(copy, heroActions("paper", paper));
   shell.append(hero);
   const actions = node("div", "actions");
   addAction(
@@ -2970,7 +3077,7 @@ function openFileImport() {
   state.dialog = {
     kind: "fileImport",
     items: [],
-    outputDirectory: (state.settings.paperRoots || [])[0] || "",
+    outputDirectory: (paperTargetOptions()[0] || [""])[0],
   };
   renderFileImport();
   showTaskDialog();
@@ -3062,11 +3169,10 @@ function renderFileImport(errorMessage = "") {
     dialogBody.append(list);
   }
 
-  const roots = state.settings.paperRoots || [];
   const grid = node("div", "form-grid paper-import-options");
   grid.append(field("outputDirectory", "Paper collection", {
     type: "select", value: task.outputDirectory,
-    options: roots.map(value => [value, value]),
+    options: paperTargetOptions(),
   }));
   grid.querySelector("select").addEventListener("change", event => {
     task.outputDirectory = event.target.value;
@@ -5018,7 +5124,7 @@ function renderTaskConfiguration(errorMessage = "") {
     return;
   }
   if (task.action === "download") {
-    const roots = state.settings.paperRoots || [];
+    const targets = paperTargetOptions();
     const acquisition = options.acquisition || "ids";
     if (!task.authorSearch) {
       grid.append(field("acquisition", "Find papers by", {
@@ -5044,9 +5150,9 @@ function renderTaskConfiguration(errorMessage = "") {
       grid.append(arxivAuthorResults(task));
     }
     grid.append(field("outputDirectory", "Paper collection", {
-      type: "select", value: options.outputDirectory || roots[0] || "",
-      options: roots.map(value => [value, value]),
-      help: "The paper directories will be created below this configured root.",
+      type: "select", value: options.outputDirectory || (targets[0] || [""])[0],
+      options: targets,
+      help: "The paper directories will be created in this collection (a directory below a configured paper root) or in the root itself.",
     }));
     grid.append(checkbox(
       "force", "Replace matching downloads",

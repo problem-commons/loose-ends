@@ -849,6 +849,33 @@ class WorkbenchPlanningTests(unittest.TestCase):
             self.assertFalse(app.paper_imports)
             app.catalog.schedule.assert_called_once_with([target])
 
+    def test_file_import_into_a_collection(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            papers = root / "papers"
+            (papers / "own").mkdir(parents=True)
+            app = object.__new__(workbench.WorkbenchApplication)
+            app.state_directory = root / "state"
+            app.paper_output_roots = [papers]
+            app.paper_import_lock = threading.Lock()
+            app.paper_imports = {}
+            app.catalog = Mock()
+
+            import_id = app.create_paper_import()["id"]
+            app.upload_paper_import_file(import_id, "item-0/p.pdf", BytesIO(b"%PDF-test"), 9)
+            with self.assertRaisesRegex(PlanError, "collections"):
+                app.commit_paper_import(import_id, {
+                    "outputDirectory": str(root / "elsewhere"), "inputs": ["item-0/p.pdf"],
+                })
+            import_id = app.create_paper_import()["id"]
+            app.upload_paper_import_file(import_id, "item-0/p.pdf", BytesIO(b"%PDF-test"), 9)
+            result = app.commit_paper_import(import_id, {
+                "outputDirectory": str(papers / "own"), "inputs": ["item-0/p.pdf"],
+            })
+            target = Path(result["papers"][0]["path"])
+            self.assertEqual(target.parent, papers / "own")
+            self.assertTrue((target / "paper.pdf").is_file())
+
     def test_file_import_rejects_path_traversal(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

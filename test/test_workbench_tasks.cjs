@@ -47,6 +47,7 @@ test("task steps remember independent scroll positions only until the dialog clo
   });
   const renderers = [
     "showTaskDialog", "openTask", "beginTaskDialogStep", "renderTaskConfiguration", "renderTaskConfirmation", "reviewTask",
+    "paperTargetOptions",
   ].map(name => source.match(new RegExp(`^(?:async )?function ${name}\\([^]*?^}`, "m"))[0]).join("\n");
   vm.runInContext(renderers, context);
 
@@ -612,4 +613,30 @@ test("compact job summaries retain run counts in their scope", () => {
   assert.equal(context.taskScopeSummary({
     plan: { targets: [{ kind: "problem" }, { kind: "problem" }] }, counts: { total: 3 },
   }), "2 problems · 1 paper · 3 runs");
+});
+
+test("added papers go to a collection below a paper root, or to the root", () => {
+  const optionsSource = source.match(/^function paperTargetOptions\([^]*?^}/m)[0];
+  const run = settings => {
+    const context = vm.createContext({ state: { settings } });
+    vm.runInContext(optionsSource, context);
+    return JSON.parse(JSON.stringify(context.paperTargetOptions()));
+  };
+  assert.deepEqual(
+    run({
+      paperRoots: ["/pool/papers"],
+      paperTargets: ["/pool/papers/own", "/pool/papers/watchmen", "/pool/papers"],
+    }),
+    [
+      ["/pool/papers/own", "papers/own"],
+      ["/pool/papers/watchmen", "papers/watchmen"],
+      ["/pool/papers", "papers/ (root)"],
+    ],
+  );
+  assert.deepEqual(
+    run({ paperRoots: ["C:\\pool\\papers"], paperTargets: ["C:\\pool\\papers\\own", "C:\\pool\\papers"] }),
+    [["C:\\pool\\papers\\own", "papers/own"], ["C:\\pool\\papers", "papers/ (root)"]],
+  );
+  // Older servers report roots only.
+  assert.deepEqual(run({ paperRoots: ["/papers"] }), [["/papers", "/papers"]]);
 });

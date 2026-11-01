@@ -211,6 +211,8 @@ button { color: inherit; }
 .badge.collection { background: var(--low-bg); color: var(--low); }
 .label-badges .badge { text-transform: none; letter-spacing: 0; }
 .star-button { white-space: nowrap; }
+.hero-actions { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
+.hero-actions .button { white-space: nowrap; }
 .star-button.starred { background: var(--amber-soft); color: var(--amber); }
 
 .eyebrow { color: var(--accent); font-size: 10px; font-weight: 850; letter-spacing: .15em; text-transform: uppercase; }

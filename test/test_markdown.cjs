@@ -85,6 +85,7 @@ test("renders math in sidebar titles and detail headings, with a plain-text fall
     },
     problemTarget() { throw stop; },
     starButton() { return {}; },
+    heroActions() { return {}; },
     labelBadges() { return {}; },
   });
   vm.runInContext(functions, context);
