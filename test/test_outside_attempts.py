@@ -189,6 +189,17 @@ class OutsideAttemptTests(unittest.TestCase):
         code, text = self.run_main(import_attempt.main, *args, "--allow-new-history")
         self.assertEqual(code, 0, text)
 
+    def test_first_attempt_on_an_untouched_problem(self):
+        problem = self.paper / "OP-002"
+        self.assertFalse(problem.exists())
+        session = self.write_session(solver_result([claim("C-001")]), "# Attempt\n\nC-001\n")
+        code, text = self.run_main(
+            import_attempt.main, problem, "--from", session, "--origin", "interactive",
+            "--person", "kbuchin", "--agent", "claude",
+        )
+        self.assertEqual(code, 0, text)
+        self.assertTrue((problem / "attempt-001" / "attempt.md").is_file())
+
     def test_dry_run_and_external_source(self):
         code, text = self.run_main(
             import_attempt.main, *self.import_args(self.good_session(), "--dry-run")

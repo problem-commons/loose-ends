@@ -143,6 +143,7 @@ def install_outside_attempt(
         raise common.CodexError(f"attempt destination already exists: {destination}")
     agents = origin["agents"]
     models = origin["models"]
+    problem.directory.mkdir(parents=True, exist_ok=True)
     staging = Path(
         tempfile.mkdtemp(prefix=".attempt-install-", dir=problem.directory)
     )
