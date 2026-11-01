@@ -216,7 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         extract_metadata(
             paper,
-            codex=codex_cli.resolve_codex_executable(args.codex),
+            codex=codex_cli.codex_runtime(
+                args.codex, codex_cli.model_options_from_args(args)
+            )[0],
             prompt=prompt,
             schema_path=args.schema.expanduser().resolve(),
             options=codex_cli.model_options_from_args(args),

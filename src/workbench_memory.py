@@ -31,6 +31,17 @@ def _memory_enforcement_supported() -> bool:
     return os.name == "nt" or sys.platform.startswith("linux")
 
 
+# Without a delegated cgroup (as in a default WSL2 setup) Linux cannot
+# enforce worker limits.  Workers then run without a limit, with a warning,
+# unless this variable asks to pause the queue instead.
+REQUIRE_MEMORY_LIMIT_ENV = "LOOSE_ENDS_REQUIRE_MEMORY_LIMIT"
+
+
+def _memory_limit_required() -> bool:
+    value = os.environ.get(REQUIRE_MEMORY_LIMIT_ENV, "").strip().casefold()
+    return value in {"1", "true", "yes", "on"}
+
+
 class _IO_COUNTERS(ctypes.Structure):
     _fields_ = [
         ("ReadOperationCount", ctypes.c_ulonglong),
@@ -562,13 +573,25 @@ class QueueMemoryController:
                     continue
             del self._containers[run_id]
 
+    def _best_effort(self) -> bool:
+        """Run unlimited because Linux enforcement could not be set up."""
+        return (
+            not self.available
+            and sys.platform.startswith("linux")
+            and not _memory_limit_required()
+        )
+
     def prepare_run(self, run_id: str, settings: dict) -> str | None:
         """Create and configure a worker's container before it starts."""
         desired = self._normalize_limit(
             per_worker_limit_bytes(settings, self.physical_bytes)
         )
         if not self.available:
-            if desired is None or not _memory_enforcement_supported():
+            if (
+                desired is None
+                or not _memory_enforcement_supported()
+                or self._best_effort()
+            ):
                 return None
             raise OSError(self.error or "worker memory enforcement is unavailable")
         try:
@@ -620,6 +643,13 @@ class QueueMemoryController:
                 snapshot["warning"] = (
                     f"Worker memory limits are unavailable on {platform}; "
                     "workers will run without a memory limit."
+                )
+            elif desired is not None and self._best_effort():
+                snapshot["warning"] = (
+                    "Worker memory limits cannot be enforced here (no delegated "
+                    "cgroup, as in a default WSL2 setup); workers run without a "
+                    f"memory limit. Set {REQUIRE_MEMORY_LIMIT_ENV}=1 to pause "
+                    "the queue instead."
                 )
             elif desired is not None:
                 snapshot["pending"] = True

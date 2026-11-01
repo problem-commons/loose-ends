@@ -604,9 +604,13 @@ class WritePaperTests(unittest.TestCase):
             write_paper.resolve_input_selectors([selector])
         discover.assert_not_called()
 
+    @patch.dict(
+        "os.environ",
+        {"LOOSE_ENDS_AGENT": "", "LOOSE_ENDS_MODEL": "", "LOOSE_ENDS_REASONING_EFFORT": ""},
+    )
     def test_cli_defaults_to_one_live_frontier_round(self):
         parsed = write_paper.build_parser().parse_args(["attempt-001"])
-        self.assertEqual(parsed.model, "gpt-6-astra")
+        self.assertEqual(parsed.model, "gpt-6.1-sol")
         self.assertEqual(parsed.reasoning_effort, "xhigh")
         self.assertEqual(parsed.web_search, "live")
         self.assertEqual(parsed.max_rounds, 1)

@@ -454,7 +454,8 @@ provenance, the ordered paper-author list, and a machine-readable index of the
 `OP-###` entries. The JSONL event stream and stderr log are retained for
 diagnostics.
 
-Install and authenticate the Codex CLI first, then analyze one paper:
+Install and authenticate the Codex CLI first (or Claude Code, with
+`--agent claude`), then analyze one paper:
 
 ```sh
 codex login
@@ -470,8 +471,16 @@ python src/analyze_papers.py papers/edemaine --jobs 4
 
 The default is one agent at a time. Start with modest concurrency because every
 job consumes Codex capacity independently. All Codex-backed scripts default to
-`--model gpt-6-astra --reasoning-effort xhigh`; use either option to override
-that choice, or `--force` to regenerate a current analysis.
+`--model gpt-6.1-sol --reasoning-effort xhigh` (GPT-6 Astra is close in quality
+at about five times the price; request it with `--model gpt-6-astra`). Use either
+option to override that choice; see "Choosing the agent" for per-person defaults.
+
+An installed analysis is kept even when a new paper version, prompt, or model
+setting has made it stale: re-analysis assigns `OP-###` numbers afresh, while
+triage, literature reports, attempts, and any records kept beside the paper
+tree refer to the installed numbers. Pass `--reanalyze` to redo stale analyses
+deliberately, or `--force` to redo current ones as well. A dry run lists kept
+analyses as `Would keep`.
 Parallel jobs are started one second apart to avoid Windows CLI startup races;
 after startup, their paper analyses run concurrently. Pre-thread Windows
 path-startup failures are retried up to twice.
@@ -591,6 +600,12 @@ python src/triage_open_problems.py \
 python src/triage_open_problems.py papers/edemaine \
   --explicitness explicit
 ```
+
+Paper or folder paths may be combined with `PAPER/OP-ID` paths: triage and
+review then select the union, for example every problem of one paper plus two
+problems of another. Literature search and solving refuse such a mix, because
+paper paths there select by triage class while direct problem paths bypass it;
+run them as two commands.
 
 One Codex turn triages all selected stale problems from the same paper. This is
 substantially cheaper than starting one turn per problem. The Markdown and
@@ -1101,7 +1116,11 @@ lightweight filesystem signatures in the background. Only new or changed
 roots are rebuilt, so adding an empty root does not rescan existing roots.
 Cache directories are ignored by both Git and the filesystem watcher. Changes
 to catalog code, prompts, or schemas invalidate the affected caches, and
-unchanged freshness digests are reused within the running server.
+unchanged freshness digests are reused within the running server. Because file
+events can be lost (for example during long command-line runs with heavy
+workspace churn), the server also compares these signatures every 30 seconds
+and rescans a root only when it changed; set
+`LOOSE_ENDS_CATALOG_POLL_SECONDS` to change the interval, or 0 to disable it.
 
 The Papers view has **Add from arXiv** and **Add from files** actions. The file
 importer accepts multiple dragged PDF files, ZIP/tar.gz archives, and/or folders, shows the selected
@@ -1151,9 +1170,9 @@ interrupted and runs that installed no output can be retried. A run that
 installed output before a later phase failed is marked partial so the next
 action can operate on that output without accidentally duplicating it.
 
-In **Activity**, expand **Codex transcript** for a read-only
-transcript: Codex messages appear as Markdown, with expandable task prompts,
-tool activity, and diagnostics. Transcripts refresh while the run is active.
+In **Activity**, expand **Agent transcript** for a read-only
+transcript: agent messages appear as Markdown, with expandable task prompts,
+tool activity, and diagnostics, for Codex and Claude Code runs alike. Transcripts refresh while the run is active.
 The **command & output** fold opens independently.
 Each problem also has a **Full reports → Codex logs** tab for the selected
 attempt's saved solution/review logs and the problem's triage/literature logs.
@@ -1196,9 +1215,10 @@ Linux enforcement requires a writable cgroups v2 subtree delegated to the
 workbench with the memory controller enabled. By default, the workbench creates
 a manager cgroup and one child cgroup per worker beneath its current cgroup. A
 service manager or container runtime can instead provide an already-delegated
-parent through `LOOSE_ENDS_CGROUP_ROOT`. If a finite policy is configured but delegation is
-unavailable, the queue pauses and the worker popover reports the setup error;
-select infinity to run without enforcement.
+parent through `LOOSE_ENDS_CGROUP_ROOT`. If a finite policy is configured but
+delegation is unavailable (as in a default WSL2 installation), workers run
+without a memory limit and the worker popover shows a warning. Set
+`LOOSE_ENDS_REQUIRE_MEMORY_LIMIT=1` to pause the queue in that case instead.
 
 IP-address access and the machine's own hostnames are accepted; use repeatable
 `--allowed-host NAME` for an additional trusted DNS name. Network clients can
@@ -1246,6 +1266,21 @@ python src/solve_open_problems.py papers/edemaine --from-triage attempt \
 The workbench offers the same choice as **Agent** and **Critic agent** under
 **Model and web-search settings**.
 
+Each person can set their own defaults once, for example in `~/.bashrc`, so
+that commands and workbench dialogs use them whenever no agent or model is
+chosen:
+
+```sh
+export LOOSE_ENDS_AGENT=claude         # or codex (the built-in default)
+export LOOSE_ENDS_MODEL=opus           # model for that default agent
+export LOOSE_ENDS_REASONING_EFFORT=high  # optional; stages with their own default keep it
+```
+
+`LOOSE_ENDS_MODEL` applies to the default agent only: an explicit `--agent`
+of the other vendor uses that vendor's default model. Configuration digests
+and manifests are unaffected, because they record the agent and model a run
+actually used.
+
 The Claude Code agent follows the same contract as Codex: it receives the same
 prompt and staged read-only inputs, writes `agent-result.json`, and runs
 `python -m validation.validate` before finishing; the host revalidates as
@@ -1285,9 +1320,9 @@ Requirements and differences:
   re-runs work instead of reusing results. Codex digests are unchanged.
   Manifests of non-Codex runs record `requested_agent` and `agent_version`.
 * Usage tracking records Claude Code tokens; its cost estimate shows as
-  unknown because the price table covers OpenAI models only. The Codex CLI
-  must currently still be installed, because commands query its version at
-  startup.
+  unknown because the price table covers OpenAI models only. Runs in which
+  every turn uses Claude Code do not need the Codex CLI; their manifests
+  record its version as `not installed`.
 
 ## Development
 

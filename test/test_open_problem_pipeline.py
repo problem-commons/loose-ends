@@ -2478,6 +2478,10 @@ class OpenProblemPipelineTests(unittest.TestCase):
 
             self.assertFalse(common.triage_is_current(problem))
 
+    @patch.dict(
+        "os.environ",
+        {"LOOSE_ENDS_AGENT": "", "LOOSE_ENDS_MODEL": "", "LOOSE_ENDS_REASONING_EFFORT": ""},
+    )
     def test_all_cli_entry_points_share_frontier_model_defaults(self):
         parsers = (
             analyze_papers.build_parser(),
@@ -2496,7 +2500,7 @@ class OpenProblemPipelineTests(unittest.TestCase):
         for parser, argv in zip(parsers, arguments):
             with self.subTest(program=parser.prog):
                 parsed = parser.parse_args(argv)
-                self.assertEqual(parsed.model, "gpt-6-astra")
+                self.assertEqual(parsed.model, "gpt-6.1-sol")
                 self.assertEqual(parsed.reasoning_effort, "xhigh")
                 self.assertIsNone(parsed.prompt)
                 self.assertIsInstance(parsed.prompt_template, Path)

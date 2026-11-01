@@ -204,6 +204,30 @@ class WorkbenchPlanningTests(unittest.TestCase):
                         self.assertNotIn("codexHome", plan["options"])
                     self.assertEqual(request["options"]["codexHome"], value)
 
+    def test_reanalysis_is_explicit_and_warned(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paper = make_paper(root)
+
+            def argv(options):
+                plan = build_plan(
+                    {
+                        "action": "analyze",
+                        "targets": [{"kind": "paper", "path": str(paper)}],
+                        "options": options,
+                    },
+                    project_root=PROJECT_ROOT, allowed_roots=[root],
+                    manuscripts=root / "manuscripts", catalog_version=1,
+                )
+                return plan["units"][0]["argv"], plan.get("warnings", [])
+
+            plain, plain_warnings = argv({})
+            again, warnings = argv({"reanalyze": True})
+        self.assertNotIn("--reanalyze", plain)
+        self.assertFalse(any("renumbers" in warning for warning in plain_warnings))
+        self.assertIn("--reanalyze", again)
+        self.assertTrue(any("renumbers" in warning for warning in warnings))
+
     def test_write_dialog_job_flow(self):
         result = subprocess.run(
             ["node", "--test", "test_workbench_tasks.cjs"],
@@ -2644,10 +2668,38 @@ class WorkbenchStoreTests(unittest.TestCase):
                             self.assertIn("macOS", snapshot["warning"])
                         self.assertIsNone(controller.prepare_run("test-run", settings))
 
+    def test_linux_setup_failure_runs_without_limit_unless_required(self):
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        with (
+            patch.object(workbench_memory.sys, "platform", "linux"),
+            patch.object(workbench_memory.os, "name", "posix"),
+            patch.object(
+                workbench_memory,
+                "physical_memory_bytes",
+                return_value=16 * workbench_memory.GB_BYTES,
+            ),
+            patch.object(
+                workbench_memory.QueueMemoryController,
+                "_initialize_linux",
+                side_effect=OSError("no delegated cgroup"),
+            ),
+            patch.dict(os.environ, {workbench_memory.REQUIRE_MEMORY_LIMIT_ENV: ""}),
+        ):
+            controller = workbench_memory.QueueMemoryController(database)
+            settings = {"memoryLimit": {"mode": "percent", "value": 50}}
+            snapshot = controller.reconcile(settings)
+            self.assertFalse(snapshot["pending"])
+            self.assertIn("without a", snapshot["warning"])
+            self.assertIn(workbench_memory.REQUIRE_MEMORY_LIMIT_ENV, snapshot["warning"])
+            self.assertIsNone(controller.prepare_run("test-run", settings))
+
     def test_supported_platform_setup_failure_blocks_finite_memory_policies(self):
         database = PROJECT_ROOT / "unused-memory-test.sqlite3"
         for platform, os_name in (("linux", "posix"), ("win32", "nt")):
             with (
+                patch.dict(
+                    os.environ, {workbench_memory.REQUIRE_MEMORY_LIMIT_ENV: "1"}
+                ),
                 patch.object(workbench_memory.sys, "platform", platform),
                 patch.object(workbench_memory.os, "name", os_name),
                 patch.object(
@@ -2680,7 +2732,7 @@ class WorkbenchStoreTests(unittest.TestCase):
                 self.assertFalse(controller.reconcile(unlimited)["pending"])
                 self.assertIsNone(controller.prepare_run("test-run", unlimited))
 
-    def test_linux_without_delegation_pauses_a_finite_policy(self):
+    def test_linux_without_delegation_pauses_a_finite_policy_when_required(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
         controller.physical_bytes = 64 * workbench_memory.GB_BYTES
         controller.available = False
@@ -2689,7 +2741,10 @@ class WorkbenchStoreTests(unittest.TestCase):
         controller._containers = {}
         controller._observed_peak = 0
 
-        with patch.object(workbench_memory.sys, "platform", "linux"):
+        with (
+            patch.object(workbench_memory.sys, "platform", "linux"),
+            patch.dict(os.environ, {workbench_memory.REQUIRE_MEMORY_LIMIT_ENV: "1"}),
+        ):
             snapshot = controller.reconcile(
                 {"memoryLimit": {"mode": "percent", "value": 50}}
             )
@@ -3173,6 +3228,40 @@ class WorkbenchStoreTests(unittest.TestCase):
 
 
 class WorkbenchWatchTests(unittest.TestCase):
+    def test_catalog_notices_new_attempts_without_file_events(self):
+        # No watcher runs here, as if the file events had been lost.
+        with (
+            TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {workbench.CATALOG_POLL_ENV: "0.2"}),
+        ):
+            root = Path(temporary)
+            paper = make_paper(root)
+            (paper / "OP-001").mkdir(exist_ok=True)
+            manager = CatalogManager([root], root / "manuscripts", EventHub())
+            self.addCleanup(manager.close)
+            self.assertTrue(manager.wait_until_ready(8))
+
+            def attempts():
+                return [
+                    row.get("attemptName")
+                    for row in manager.snapshot()["reviews"]
+                    if row.get("attemptName")
+                ]
+
+            self.assertEqual(attempts(), [])
+            staging = paper / "OP-001" / ".attempt-install-test"
+            staging.mkdir()
+            common.write_json(staging / "solver-result.json", {
+                "claimed_result_type": "partial_result", "summary": "Progress.",
+                "checkable_claims": [],
+            })
+            (staging / "attempt.md").write_text("# Attempt", encoding="utf-8")
+            staging.rename(paper / "OP-001" / "attempt-001")
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and not attempts():
+                time.sleep(0.1)
+            self.assertEqual(attempts(), ["attempt-001"])
+
     def test_watchdog_ignores_directory_metadata_changes(self):
         catalog = Mock()
         handler = ChangeHandler(catalog)

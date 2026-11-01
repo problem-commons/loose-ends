@@ -199,6 +199,24 @@ def format_analysis_counts(results: int, open_problems: int) -> str:
     )
 
 
+KEEP_MESSAGE = (
+    "existing analysis kept although it is stale; pass --reanalyze to redo it, "
+    "which renumbers its open problems"
+)
+
+
+def has_installed_analysis(analysis_directory: Path) -> bool:
+    """Return whether an analysis with a problem list is already installed.
+
+    Re-analysis assigns open-problem IDs afresh, while triage, literature
+    reports, attempts, and any records kept beside the paper tree refer to
+    the installed IDs.  Such an analysis is therefore only replaced on
+    request, even when a new prompt or model setting has made it stale.
+    """
+    manifest = load_manifest(analysis_directory / MANIFEST_FILE)
+    return manifest is not None and isinstance(manifest.get("open_problems"), list)
+
+
 def analysis_is_current(
     analysis_directory: Path,
     *,
@@ -410,6 +428,7 @@ def analyze_paper(
     ultrafast: bool = False,
     agent: str | None = None,
     force: bool = False,
+    reanalyze: bool = False,
     launch_interval: float = CODEX_LAUNCH_INTERVAL_SECONDS,
 ) -> AnalysisOutcome:
     """Run Codex for one paper and atomically install validated artifacts."""
@@ -440,6 +459,15 @@ def analyze_paper(
                 f"{format_analysis_counts(results, open_problems)}; "
                 "analysis matches the paper and prompt"
             ),
+            result_count=results,
+            open_problem_count=open_problems,
+        )
+    if not (force or reanalyze) and has_installed_analysis(analysis_directory):
+        results, open_problems = analysis_counts(analysis_directory)
+        return AnalysisOutcome(
+            paper_directory,
+            "kept",
+            f"{format_analysis_counts(results, open_problems)}; {KEEP_MESSAGE}",
             result_count=results,
             open_problem_count=open_problems,
         )
@@ -681,7 +709,20 @@ def build_parser() -> argparse.ArgumentParser:
         "-f",
         "--force",
         action="store_true",
-        help="reanalyze papers even when their inputs and prompt are unchanged",
+        help=(
+            "reanalyze papers even when their analysis is current; implies "
+            "--reanalyze"
+        ),
+    )
+    parser.add_argument(
+        "--reanalyze",
+        action="store_true",
+        help=(
+            "also redo installed analyses that a new paper version, prompt, "
+            "or model setting has made stale (default: keep them); this "
+            "renumbers their open problems, while existing triage, literature, "
+            "attempts, and human records keep the old numbers"
+        ),
     )
     parser.add_argument(
         "--recover-complete",
@@ -747,6 +788,7 @@ def main(argv: list[str] | None = None) -> int:
         failures: list[tuple[Path, str]] = []
         selected = 0
         current = 0
+        kept = 0
         if args.recover_complete:
             for paper in papers:
                 try:
@@ -784,7 +826,12 @@ def main(argv: list[str] | None = None) -> int:
                     paper_digest=paper_digest,
                     config_digest=config_digest,
                 )
-                if is_current:
+                is_kept = (
+                    not is_current
+                    and not (args.force or args.reanalyze)
+                    and has_installed_analysis(paper / ANALYSIS_DIRECTORY)
+                )
+                if is_current or is_kept:
                     results, open_problems = analysis_counts(
                         paper / ANALYSIS_DIRECTORY
                     )
@@ -798,13 +845,25 @@ def main(argv: list[str] | None = None) -> int:
                     f"Current: {paper} "
                     f"({format_analysis_counts(results, open_problems)})"
                 )
+            elif is_kept:
+                kept += 1
+                print(
+                    f"Would keep: {paper} "
+                    f"({format_analysis_counts(results, open_problems)}; "
+                    f"{KEEP_MESSAGE})"
+                )
             else:
                 selected += 1
-                reason = "forced" if args.force else "missing or stale"
+                reason = (
+                    "forced" if args.force
+                    else "missing" if not has_installed_analysis(paper / ANALYSIS_DIRECTORY)
+                    else "stale; renumbers its open problems"
+                )
                 print(f"Would analyze: {paper} ({reason})")
         print(
             f"Selected {len(papers)} paper(s): {selected} would run; "
             f"{current} current"
+            + (f"; {kept} stale but kept" if kept else "")
             + (f"; {len(failures)} failed." if failures else ".")
         )
         if selected:
@@ -815,7 +874,10 @@ def main(argv: list[str] | None = None) -> int:
         codex = resolve_codex_executable(args.codex)
         codex_version = read_codex_version(codex)
     except (AnalysisError, OSError) as exc:
-        return codex_cli.report_error(parser, exc)
+        if options.agent_name == "codex":
+            return codex_cli.report_error(parser, exc)
+        # Claude Code runs do not need Codex installed.
+        codex, codex_version = args.codex, "not installed"
 
     if args.recover_complete:
         print(
@@ -858,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
                     ultrafast=options.ultrafast,
                     agent=options.agent,
                     force=args.force,
+                    reanalyze=args.reanalyze,
                 ): paper
                 for paper in papers
             }
@@ -876,6 +939,8 @@ def main(argv: list[str] | None = None) -> int:
                 label = "Recovered"
             elif outcome.status == "unrecovered":
                 label = "Skipped"
+            elif outcome.status == "kept":
+                label = "Kept"
             else:
                 label = "Analyzed"
             print(f"{label}: {paper} ({outcome.message})")
@@ -884,13 +949,16 @@ def main(argv: list[str] | None = None) -> int:
     current = sum(outcome.status == "current" for outcome in outcomes)
     recovered = sum(outcome.status == "recovered" for outcome in outcomes)
     unrecovered = sum(outcome.status == "unrecovered" for outcome in outcomes)
+    kept = sum(outcome.status == "kept" for outcome in outcomes)
     total_results = sum(outcome.result_count or 0 for outcome in outcomes)
     total_open_problems = sum(
         outcome.open_problem_count or 0 for outcome in outcomes
     )
     print(
         f"Completed {analyzed} analysis run(s); recovered {recovered}; "
-        f"{current} already current; {unrecovered} had no complete run"
+        f"{current} already current; "
+        + (f"{kept} stale but kept (use --reanalyze); " if kept else "")
+        + f"{unrecovered} had no complete run"
         + (f"; {len(failures)} failed" if failures else "")
         + f". Totals: "
         f"{format_analysis_counts(total_results, total_open_problems)}."
