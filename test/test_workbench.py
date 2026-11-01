@@ -2668,10 +2668,38 @@ class WorkbenchStoreTests(unittest.TestCase):
                             self.assertIn("macOS", snapshot["warning"])
                         self.assertIsNone(controller.prepare_run("test-run", settings))
 
+    def test_linux_setup_failure_runs_without_limit_unless_required(self):
+        database = PROJECT_ROOT / "unused-memory-test.sqlite3"
+        with (
+            patch.object(workbench_memory.sys, "platform", "linux"),
+            patch.object(workbench_memory.os, "name", "posix"),
+            patch.object(
+                workbench_memory,
+                "physical_memory_bytes",
+                return_value=16 * workbench_memory.GB_BYTES,
+            ),
+            patch.object(
+                workbench_memory.QueueMemoryController,
+                "_initialize_linux",
+                side_effect=OSError("no delegated cgroup"),
+            ),
+            patch.dict(os.environ, {workbench_memory.REQUIRE_MEMORY_LIMIT_ENV: ""}),
+        ):
+            controller = workbench_memory.QueueMemoryController(database)
+            settings = {"memoryLimit": {"mode": "percent", "value": 50}}
+            snapshot = controller.reconcile(settings)
+            self.assertFalse(snapshot["pending"])
+            self.assertIn("without a", snapshot["warning"])
+            self.assertIn(workbench_memory.REQUIRE_MEMORY_LIMIT_ENV, snapshot["warning"])
+            self.assertIsNone(controller.prepare_run("test-run", settings))
+
     def test_supported_platform_setup_failure_blocks_finite_memory_policies(self):
         database = PROJECT_ROOT / "unused-memory-test.sqlite3"
         for platform, os_name in (("linux", "posix"), ("win32", "nt")):
             with (
+                patch.dict(
+                    os.environ, {workbench_memory.REQUIRE_MEMORY_LIMIT_ENV: "1"}
+                ),
                 patch.object(workbench_memory.sys, "platform", platform),
                 patch.object(workbench_memory.os, "name", os_name),
                 patch.object(
@@ -2704,7 +2732,7 @@ class WorkbenchStoreTests(unittest.TestCase):
                 self.assertFalse(controller.reconcile(unlimited)["pending"])
                 self.assertIsNone(controller.prepare_run("test-run", unlimited))
 
-    def test_linux_without_delegation_pauses_a_finite_policy(self):
+    def test_linux_without_delegation_pauses_a_finite_policy_when_required(self):
         controller = object.__new__(workbench_memory.QueueMemoryController)
         controller.physical_bytes = 64 * workbench_memory.GB_BYTES
         controller.available = False
@@ -2713,7 +2741,10 @@ class WorkbenchStoreTests(unittest.TestCase):
         controller._containers = {}
         controller._observed_peak = 0
 
-        with patch.object(workbench_memory.sys, "platform", "linux"):
+        with (
+            patch.object(workbench_memory.sys, "platform", "linux"),
+            patch.dict(os.environ, {workbench_memory.REQUIRE_MEMORY_LIMIT_ENV: "1"}),
+        ):
             snapshot = controller.reconcile(
                 {"memoryLimit": {"mode": "percent", "value": 50}}
             )

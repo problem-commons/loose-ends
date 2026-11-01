@@ -1204,9 +1204,10 @@ Linux enforcement requires a writable cgroups v2 subtree delegated to the
 workbench with the memory controller enabled. By default, the workbench creates
 a manager cgroup and one child cgroup per worker beneath its current cgroup. A
 service manager or container runtime can instead provide an already-delegated
-parent through `LOOSE_ENDS_CGROUP_ROOT`. If a finite policy is configured but delegation is
-unavailable, the queue pauses and the worker popover reports the setup error;
-select infinity to run without enforcement.
+parent through `LOOSE_ENDS_CGROUP_ROOT`. If a finite policy is configured but
+delegation is unavailable (as in a default WSL2 installation), workers run
+without a memory limit and the worker popover shows a warning. Set
+`LOOSE_ENDS_REQUIRE_MEMORY_LIMIT=1` to pause the queue in that case instead.
 
 IP-address access and the machine's own hostnames are accepted; use repeatable
 `--allowed-host NAME` for an additional trusted DNS name. Network clients can
