@@ -876,6 +876,52 @@ instead of being a free critic judgment. The critic does not assess novelty;
 it may use live web search only to verify an external theorem invoked by the
 attempt. Literature changes therefore do not invalidate mathematical reviews.
 
+## Attempts made outside the solver
+
+Research on a problem also happens outside solve runs: in an interactive
+session with an agent, or in a separate project repository. Two commands
+connect that work to the attempt history without running an agent.
+
+Export the context a solve run would get:
+
+```sh
+python src/export_problem_context.py papers/edemaine/arXiv-.../OP-001 \
+  --output ~/work/OP-001-context
+```
+
+The directory receives `inputs/` (paper, analysis, every attempt with its
+critique, and the current triage and literature report, staged exactly as for a
+solve run), `TASK.md` (the solver's instructions with the problem's research
+guidance), the result schema, a README, and `context.json`, which records the
+attempt history the export is based on. `--replace` refreshes an earlier
+export.
+
+Write the result in the solver's format into a directory of its own:
+`attempt.md`, `agent-result.json` and any `artifacts/` it lists, as a
+cumulative snapshot that reconciles the earlier claims. Then install it as the
+problem's next attempt:
+
+```sh
+python src/import_attempt.py papers/edemaine/arXiv-.../OP-001 \
+  --from ~/work/OP-001-result --context ~/work/OP-001-context/context.json \
+  --origin interactive --person NAME --agent claude --model opus
+python src/import_attempt.py papers/edemaine/arXiv-.../OP-001 \
+  --from ~/project/pool-export --origin external \
+  --source https://github.com/org/project@3f2c1a9 \
+  --person NAME --agent claude --agent codex
+```
+
+The import validates the result with the solver's own validator (claim IDs,
+prior-claim dispositions, artifacts) and refuses it with a list of problems
+otherwise; `--dry-run` only validates. With `--context` it also stops when
+attempts were added or reviewed after the export, since the snapshot could not
+reconcile them (`--allow-new-history` overrides). The attempt's manifest
+records an `origin`: kind, people, agents, models, and the session or source
+repository. Everything else treats it like a solver attempt: critics review
+it, triage becomes stale and can suggest next directions, later solve runs
+build on it, and the workbench labels it *interactive* or *project*. Review it
+with an agent other than the one that produced it.
+
 ## Write a paper
 
 `src/write_paper.py` composes one deliberate research-paper manuscript from
