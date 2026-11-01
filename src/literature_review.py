@@ -875,6 +875,7 @@ def main(argv: list[str] | None = None) -> int:
             problem_ids=set(args.problem_ids) if args.problem_ids else None,
         )
         problems = common.filter_exact_problems(problems, direct_exact)
+        problems = common.drop_skipped(problems, direct_exact, "searching literature for")
         excluded: list[common.ProblemRef] = []
         exclusion_label = "without matching current triage"
         if args.attempted:

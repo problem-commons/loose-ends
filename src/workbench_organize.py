@@ -11,7 +11,10 @@ files given with `--labels`, typically written by a project's own tooling:
 A target is a paper or problem path below a paper root; an arXiv paper may be
 named without its version suffix.  Labels on a paper apply to its problems.
 Hidden labels hide what they mark until the viewer chooses to show hidden
-items.  Stars are personal and live in the workbench state directory.
+items.  A label with "skip": true also keeps triage, literature search and
+solving away from what it marks, when its file is named in the environment
+variable LOOSE_ENDS_LABELS (os.pathsep-separated; the workbench passes it on to
+its tasks).  Stars are personal and live in the workbench state directory.
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ from typing import Iterable, Sequence
 
 
 LABELS_SCHEMA_VERSION = 1
+LABELS_ENV = "LOOSE_ENDS_LABELS"
+PROBLEM_ID_RE = re.compile(r"^OP-[0-9]{3,}$")
 STARS_FILE = "stars.json"
 MAX_LABEL_LENGTH = 60
 VERSION_RE = re.compile(r"v[0-9]+$")
@@ -38,6 +43,7 @@ class Label:
     label: str
     hidden: bool = False
     title: str = ""
+    skip: bool = False
 
     def record(self) -> dict:
         return {"label": self.label, "hidden": self.hidden, "title": self.title}
@@ -77,8 +83,33 @@ def read_labels(path: Path) -> tuple[list[Label], list[str]]:
             label.strip()[:MAX_LABEL_LENGTH],
             hidden is True,
             title if isinstance(title, str) else "",
+            entry.get("skip") is True,
         ))
     return labels, errors
+
+
+def environment_label_paths() -> list[Path]:
+    value = os.environ.get(LABELS_ENV, "")
+    return [Path(part).expanduser() for part in value.split(os.pathsep) if part.strip()]
+
+
+def skip_reason(labels: Iterable[Label], paper_directory: Path, problem_id: str) -> str | None:
+    """Why a skip label keeps the pipeline away from a problem, if one does."""
+    paper = paper_directory.as_posix()
+    candidates = {paper, VERSION_RE.sub("", paper)}
+    for label in labels:
+        if not label.skip:
+            continue
+        head, _, tail = label.target.rpartition("/")
+        paper_target, op = (head, tail) if PROBLEM_ID_RE.match(tail) else (label.target, "")
+        if op and op != problem_id:
+            continue
+        if any(
+            candidate == paper_target or candidate.endswith("/" + paper_target)
+            for candidate in candidates
+        ):
+            return label.title or label.label
+    return None
 
 
 class LabelSource:

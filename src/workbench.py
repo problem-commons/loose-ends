@@ -66,7 +66,7 @@ ASSET_DIRECTORY = Path(__file__).resolve().parent / "workbench_web"
 DEFAULT_STATE_DIRECTORY = PROJECT_ROOT / ".loose-ends"
 SCHEDULER_ERROR_RETRY_SECONDS = 5.0
 DEFAULT_MANUSCRIPTS = PROJECT_ROOT / "manuscripts"
-IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs"}
+IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs", ".extra-history"}
 LABEL_POLL_SECONDS = 2.0
 IGNORED_PREFIXES = (
     ".run-",
@@ -2874,7 +2874,7 @@ def main(argv: list[str] | None = None) -> int:
             paths=paths,
             manuscripts=manuscripts,
             state_directory=state_directory,
-            labels=args.labels,
+            labels=args.labels or workbench_organize.environment_label_paths(),
         )
         app.start_watching()
         server = WorkbenchHTTPServer(
