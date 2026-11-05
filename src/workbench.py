@@ -596,6 +596,8 @@ def _manuscript_inventory(
                     draft / "readiness.md",
                     draft / "paper-critique.md",
                     draft / "paper-review.json",
+                    draft / "exposition-review.md",
+                    draft / "exposition-review.json",
                 )
                 if path.is_file()
             ]

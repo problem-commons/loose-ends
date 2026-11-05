@@ -1,0 +1,88 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "clear",
+        "needs_minor_revision",
+        "needs_major_revision"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocking",
+              "major",
+              "minor"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "motivation",
+              "structure",
+              "problem_statement",
+              "definitions",
+              "notation",
+              "theorem_statements",
+              "proofs",
+              "figures",
+              "related_work",
+              "terminology",
+              "language",
+              "criteria",
+              "other"
+            ]
+          },
+          "location": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "suggested_repair": {
+            "type": "string"
+          },
+          "criterion": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "severity",
+          "category",
+          "location",
+          "explanation",
+          "suggested_repair",
+          "criterion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "findings",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

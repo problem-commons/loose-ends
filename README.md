@@ -1119,6 +1119,74 @@ script reviews the installed unreviewed draft before deciding whether another
 writing round is appropriate. A successful final verdict is only readiness for
 human expert review, never an assertion that the paper is publication-ready.
 
+### Writing profile and exposition review
+
+Two optional additions leave the workflow above unchanged unless selected.
+
+`--writing-profile PATH` names a file or directory of writing criteria, for
+example a skill folder with `SKILL.md` and `references/`. Its text files
+(Markdown, plain text, TeX, BibTeX, JSON, YAML, TOML; no scripts, images, or
+hidden files) are copied once into the manuscript's
+`writing-profiles/<name>-<digest>/`, staged as `inputs/writing-profile/` for the
+writer and the paper critic, and recorded in every draft's `manifest.json`
+with each file's SHA-256 hash. `--writing-profile-exclude PATTERN` (repeatable,
+relative to the profile) leaves out background files that are not writing
+instructions, such as notes on evaluating the profile itself. When the profile
+has a `SKILL.md` (or `README.md`), every agent is told to start there and to
+read only the files it directs to for its own task; advice on asking the user,
+running reviews across models, or developing the profile does not apply in a
+pipeline run. The profile digest is part of the writer's and critic's
+configuration digests. The profile adds presentation criteria; it does not
+change the output files, the structured response, traceability, citation
+verification, or the rule that the manuscript keeps the internal workflow out.
+
+`--exposition-review` adds a reader who sees only the manuscript: `main.tex`,
+`references.bib`, `main.pdf`, `figures/`, the intended audience (`--audience
+TEXT`), and the writing profile. It gets no readiness notes, solver attempts,
+originating-paper analysis, critic report, or earlier drafts, works in a
+temporary directory outside the manuscript tree, and runs without web search
+unless `--exposition-web-search` says otherwise. This is a restricted packet,
+not a technical barrier: the agent sandboxes do not forbid reading other
+files, and the prompt tells the reader not to. It reviews every draft the
+critic does not send back to research and writes `exposition-review.md`,
+`exposition-review.json` (findings `X-001`, ...; verdict `clear`,
+`needs_minor_revision`, or `needs_major_revision`), and
+`exposition-review-manifest.json` (draft digest, configuration digest, staged
+files) beside the critic's report. The full-context critic is unchanged and
+never sees the reader's report.
+
+In a revision the writer acts as editor of both reports: it must list every
+`P-###` and `X-###` finding in `addressed_findings` and answer each in
+`readiness.md`. It decides reader findings on the mathematics: it rejects one
+only when following it would make the paper incorrect or less precise, and a
+disagreement with the critic is not by itself a reason, since the reader may
+have found a genuine gap. With the reader enabled, a draft the critic finds
+ready for expert review is revised again, within `--max-rounds`, while the
+reader reports a blocking or major finding; minor findings do not hold a draft
+back. Each draft keeps the critic's own verdict in `paper-review.json`. When
+the round limit is reached with open reader findings, the run stops with
+"maximum rounds reached with open exposition findings". The exposition review
+judges the writing only; it is no review of the mathematics and does not count
+as one, whichever vendor runs it.
+
+The reader's model is set with `--exposition-agent`, `--exposition-model`, and
+`--exposition-reasoning-effort` (default: the critic's), its task with
+`--exposition-prompt` or `--exposition-prompt-template`.
+
+```sh
+python src/write_paper.py papers/edemaine/arXiv-.../OP-001/attempt-003 \
+  --writing-profile ~/writing/computational-geometry-writing \
+  --writing-profile-exclude 'references/evaluation.md' \
+  --exposition-review --exposition-agent claude \
+  --audience "computational geometers (SoCG)" --max-rounds 3
+```
+
+A revision keeps the writing profile, audience, and exposition review of the
+draft it revises; `--no-writing-profile` and `--no-exposition-review` switch
+them off, and `--writing-profile` with a changed profile stores and uses a new
+version. Separate editor models and checks for Ipe figure sources are not
+part of this yet.
+
 ## Human review
 
 `src/human_review.py` turns the extracted open problems, solver attempts, and

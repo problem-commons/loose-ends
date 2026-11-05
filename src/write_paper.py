@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import fnmatch
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import analyze_papers
 import codex_cli
 import open_problem_common as common
 import review_solutions
+from validation import exposition_review as exposition_review_validation
 from validation import paper as paper_validation
 from validation import paper_review as paper_review_validation
 
@@ -36,6 +38,32 @@ DEFAULT_REVIEW_PROMPT_PATH = (
 DEFAULT_REVIEW_SCHEMA_PATH = (
     PROJECT_ROOT / "schemas" / "open-problem-paper-review.schema.json"
 )
+DEFAULT_EXPOSITION_PROMPT_PATH = (
+    PROJECT_ROOT / "prompts" / "review-open-problem-paper-exposition.md"
+)
+DEFAULT_EXPOSITION_SCHEMA_PATH = (
+    PROJECT_ROOT / "schemas" / "open-problem-paper-exposition-review.schema.json"
+)
+DEFAULT_AUDIENCE = (
+    "researchers in the paper's field who know its standard background but "
+    "have not read the cited papers or any private research notes"
+)
+# A writing profile is a file or directory of writing criteria (for example a
+# skill folder: SKILL.md plus references/). Its text files are copied once per
+# manuscript into writing-profiles/<name>-<digest>/ and staged from there.
+WRITING_PROFILE_DIRECTORY = "writing-profiles"
+WRITING_PROFILE_SUFFIXES = {
+    ".md", ".markdown", ".txt", ".rst", ".tex", ".bib", ".sty", ".cls",
+    ".json", ".yaml", ".yml", ".toml",
+}
+MAX_WRITING_PROFILE_FILES = 200
+MAX_WRITING_PROFILE_BYTES = 2_000_000
+EXPOSITION_REVIEW_FILES = ("exposition-review.md", "exposition-review.json")
+EXPOSITION_SKIP_VERDICTS = {"invalid", "needs_research"}
+SERIOUS_SEVERITIES = {"blocking", "major"}
+# The file a skill folder starts from; other files are references it routes to.
+PROFILE_ENTRY_NAMES = ("SKILL.md", "README.md")
+OPEN_EXPOSITION_REASON = "maximum rounds reached with open exposition findings"
 ATTEMPT_RE = re.compile(r"^attempt-[0-9]{3,}$")
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
 RESULT_ID_RE = re.compile(r"^R-[0-9]{3,}$")
@@ -101,10 +129,64 @@ class PaperReview:
 
 
 @dataclass(frozen=True)
+class ExpositionReview:
+    draft: DraftRef
+    result: dict
+
+
+@dataclass(frozen=True)
+class WritingProfile:
+    """A versioned copy of writing criteria, stored with the manuscript."""
+
+    name: str
+    digest: str
+    directory: Path
+    files: tuple[tuple[str, str, int], ...]  # (relative path, sha256, bytes)
+    source: str
+    excluded: tuple[str, ...] = ()
+
+    @property
+    def entry(self) -> str | None:
+        return _profile_entry([path for path, _, _ in self.files])
+
+    def summary(self) -> dict:
+        return {
+            "name": self.name,
+            "digest": self.digest,
+            "entry": self.entry,
+            "files": [path for path, _, _ in self.files],
+        }
+
+    def record(self, manuscript_directory: Path) -> dict:
+        return {
+            **self.summary(),
+            "source": self.source,
+            "excluded": list(self.excluded),
+            "copy": self.directory.relative_to(manuscript_directory).as_posix(),
+            "files": [
+                {"path": path, "sha256": digest, "bytes": size}
+                for path, digest, size in self.files
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class ExpositionSettings:
+    """The manuscript-only reader: its task, model, and configuration digest."""
+
+    prompt_template: str
+    schema_path: Path
+    config_digest: str
+    options: codex_cli.ModelOptions
+    web_search: str = "disabled"
+
+
+@dataclass(frozen=True)
 class PipelineOutcome:
     drafts: tuple[DraftRef, ...]
     final_review: PaperReview | None
     reason: str
+    final_exposition: ExpositionReview | None = None
 
     @property
     def ready(self) -> bool:
@@ -112,6 +194,7 @@ class PipelineOutcome:
             self.final_review is not None
             and self.final_review.result.get("verdict")
             == "ready_for_expert_review"
+            and self.reason == "ready_for_expert_review"
         )
 
 
@@ -702,6 +785,167 @@ def _input_digest(inputs: Sequence[PaperInput]) -> str:
     return common.stable_value_digest(records)
 
 
+def _profile_files(
+    source: Path,
+    exclude: Sequence[str] = (),
+) -> list[tuple[str, Path]]:
+    """The text files of a writing profile, in a stable order."""
+    if source.is_file():
+        return [(source.name, source)]
+    if not source.is_dir():
+        raise common.CodexError(f"writing profile not found: {source}")
+    files = []
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        if any(fnmatch.fnmatchcase(relative.as_posix(), pattern) for pattern in exclude):
+            continue
+        if path.suffix.casefold() in WRITING_PROFILE_SUFFIXES:
+            files.append((relative.as_posix(), path))
+    return files
+
+
+def _profile_entry(paths: Sequence[str]) -> str | None:
+    """The file a reader of the profile starts with, if there is one."""
+    for name in PROFILE_ENTRY_NAMES:
+        if name in paths:
+            return name
+    return paths[0] if len(paths) == 1 else None
+
+
+def _profile_name(source: Path) -> str:
+    stem = source.stem if source.is_file() else source.name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip(".-_") or "writing-profile"
+    return name[:60]
+
+
+def _read_profile(files: Sequence[tuple[str, Path]]) -> list[tuple[str, bytes]]:
+    if not files:
+        raise common.CodexError(
+            "writing profile has no text files (" + ", ".join(
+                sorted(WRITING_PROFILE_SUFFIXES)
+            ) + ")"
+        )
+    if len(files) > MAX_WRITING_PROFILE_FILES:
+        raise common.CodexError(
+            f"writing profile has more than {MAX_WRITING_PROFILE_FILES} files"
+        )
+    contents = []
+    total = 0
+    for relative, path in files:
+        data = path.read_bytes()
+        total += len(data)
+        if total > MAX_WRITING_PROFILE_BYTES:
+            raise common.CodexError(
+                f"writing profile is larger than {MAX_WRITING_PROFILE_BYTES} bytes"
+            )
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise common.CodexError(
+                f"writing profile file is not UTF-8 text: {relative}"
+            ) from exc
+        contents.append((relative, data))
+    return contents
+
+
+def _profile_digest(contents: Sequence[tuple[str, bytes]]) -> tuple[str, tuple]:
+    files = tuple(
+        (relative, hashlib.sha256(data).hexdigest(), len(data))
+        for relative, data in contents
+    )
+    digest = common.stable_value_digest(
+        [{"path": path, "sha256": sha} for path, sha, _ in files]
+    )
+    return digest, files
+
+
+def read_writing_profile(
+    source: Path,
+    exclude: Sequence[str] = (),
+) -> tuple[str, str, tuple, list[tuple[str, bytes]]]:
+    """Name, digest, file records, and contents of a profile, without storing it."""
+    source = source.expanduser().resolve()
+    contents = _read_profile(_profile_files(source, exclude))
+    digest, files = _profile_digest(contents)
+    return _profile_name(source), digest, files, contents
+
+
+def load_writing_profile(
+    source: Path,
+    manuscript_directory: Path,
+    exclude: Sequence[str] = (),
+) -> WritingProfile:
+    """Store a versioned copy of the profile with the manuscript and return it."""
+    name, digest, files, contents = read_writing_profile(source, exclude)
+    directory = manuscript_directory / WRITING_PROFILE_DIRECTORY / f"{name}-{digest[:12]}"
+    if directory.exists():
+        stored = stored_writing_profile(
+            {"name": name, "digest": digest,
+             "copy": directory.relative_to(manuscript_directory).as_posix(),
+             "source": _stored_manifest_path(source),
+             "excluded": list(exclude)},
+            manuscript_directory,
+        )
+        return stored
+    staging = Path(tempfile.mkdtemp(prefix=".profile-", dir=manuscript_directory))
+    try:
+        for relative, data in contents:
+            target = staging.joinpath(*PurePosixPath(relative).parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging, directory)
+    except OSError as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise common.CodexError(f"could not store the writing profile: {exc}") from exc
+    return WritingProfile(
+        name, digest, directory, files,
+        _stored_manifest_path(source.expanduser().resolve()),
+        tuple(exclude),
+    )
+
+
+def stored_writing_profile(record: object, manuscript_directory: Path) -> WritingProfile:
+    """The stored copy a draft manifest names, checked against its digest."""
+    if not isinstance(record, dict) or not all(
+        isinstance(record.get(key), str) for key in ("name", "digest", "copy")
+    ):
+        raise common.CodexError("draft manifest has an invalid writing_profile")
+    relative = PurePosixPath(record["copy"])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise common.CodexError("draft manifest has an invalid writing-profile copy")
+    directory = manuscript_directory.joinpath(*relative.parts)
+    contents = _read_profile(_profile_files(directory))
+    digest, files = _profile_digest(contents)
+    if digest != record["digest"]:
+        raise common.CodexError(
+            f"stored writing profile {directory} no longer matches its digest; "
+            "restore it or pass --writing-profile again"
+        )
+    excluded = record.get("excluded") or []
+    return WritingProfile(
+        record["name"], digest, directory, files,
+        str(record.get("source") or ""),
+        tuple(item for item in excluded if isinstance(item, str)),
+    )
+
+
+def _stage_writing_profile(profile: WritingProfile, destination: Path) -> None:
+    shutil.copytree(profile.directory, destination)
+
+
+def _with_extras(digest: str, **extras: object) -> str:
+    """Fold optional settings into a configuration digest; unchanged without them."""
+    present = {key: value for key, value in extras.items() if value is not None}
+    if not present:
+        return digest
+    return common.stable_value_digest({"base": digest, **present})
+
+
 def _copy_path(source: Path, destination: Path) -> None:
     if source.is_dir():
         shutil.copytree(source, destination)
@@ -722,6 +966,7 @@ def _copy_draft(
     destination: Path,
     *,
     include_review: bool,
+    include_exposition: bool = False,
 ) -> None:
     destination.mkdir(parents=True)
     names = [
@@ -740,6 +985,8 @@ def _copy_draft(
                 "paper-review-manifest.json",
             )
         )
+    if include_exposition:
+        names.extend(EXPOSITION_REVIEW_FILES)
     for name in names:
         _copy_path(source / name, destination / name)
     _copy_path(source / "figures", destination / "figures")
@@ -752,6 +999,8 @@ def stage_paper_context(
     *,
     manuscript: DraftRef | None = None,
     include_manuscript_review: bool = True,
+    include_manuscript_exposition: bool = False,
+    writing_profile: WritingProfile | None = None,
 ) -> Path:
     root = workspace / "inputs"
     root.mkdir(parents=True, exist_ok=False)
@@ -857,15 +1106,50 @@ def stage_paper_context(
             manuscript.directory,
             root / "manuscript",
             include_review=include_manuscript_review,
+            include_exposition=include_manuscript_exposition,
         )
-    common.write_json(
-        root / "index.json",
-        {
-            "papers": paper_entries,
-            "results": result_entries,
-            "manuscript_path": "manuscript" if manuscript is not None else None,
-        },
-    )
+    index = {
+        "papers": paper_entries,
+        "results": result_entries,
+        "manuscript_path": "manuscript" if manuscript is not None else None,
+    }
+    if writing_profile is not None:
+        _stage_writing_profile(writing_profile, root / "writing-profile")
+        index["writing_profile"] = {
+            **writing_profile.summary(),
+            "path": "writing-profile",
+        }
+    common.write_json(root / "index.json", index)
+    codex_cli.grant_sandbox_read_access(root)
+    return root
+
+
+def stage_exposition_context(
+    workspace: Path,
+    draft: DraftRef,
+    *,
+    audience: str,
+    writing_profile: WritingProfile | None = None,
+) -> Path:
+    """Stage only what a reader of the paper has: no research record, no reviews."""
+    root = workspace / "inputs"
+    manuscript = root / "manuscript"
+    manuscript.mkdir(parents=True, exist_ok=False)
+    for name in ("main.tex", "references.bib", "main.pdf"):
+        _copy_path(draft.directory / name, manuscript / name)
+    _copy_path(draft.directory / "figures", manuscript / "figures")
+    reader = {
+        "audience": audience,
+        "manuscript_path": "manuscript",
+        "writing_profile": None,
+    }
+    if writing_profile is not None:
+        _stage_writing_profile(writing_profile, root / "writing-profile")
+        reader["writing_profile"] = {
+            **writing_profile.summary(),
+            "path": "writing-profile",
+        }
+    common.write_json(root / "reader.json", reader)
     codex_cli.grant_sandbox_read_access(root)
     return root
 
@@ -885,6 +1169,9 @@ def render_writer_prompt(
     title_hint: str | None,
     previous: DraftRef | None,
     revision_instruction: str | None = None,
+    writing_profile: WritingProfile | None = None,
+    audience: str | None = None,
+    exposition_review: bool = False,
 ) -> str:
     if previous is None:
         mode = (
@@ -915,6 +1202,41 @@ def render_writer_prompt(
             "manuscript in the current directory; do not edit the staged "
             "prior draft."
         )
+    if previous is not None and exposition_review:
+        mode += (
+            "\n\nA second reviewer read the previous draft without the research "
+            "context, as a member of the intended audience, and reported on its "
+            "exposition in `inputs/manuscript/exposition-review.md` and "
+            "`inputs/manuscript/exposition-review.json`. As the editor of this "
+            "revision, consider both reports. Include each of its `X-###` "
+            "findings in `addressed_findings` too, and address each explicitly "
+            "in `readiness.md`. Decide each one on the mathematics: mark it "
+            "`rejected` only when following it would make the manuscript "
+            "incorrect or less precise, and explain why. A disagreement with "
+            "the paper critic is not by itself a reason to reject it: the "
+            "reader may have found a genuine gap, so check the argument it "
+            "points to and repair the gap or explain it. Like `P-###`, `X-###` "
+            "IDs never appear in `main.tex`."
+        )
+    if writing_profile is not None:
+        mode += "\n\n" + _profile_instruction(
+            writing_profile,
+            "inputs/writing-profile",
+            "for drafting and revising a manuscript",
+        ) + (
+            " You are the writer and, in a revision, the editor of an automated "
+            "pipeline: the pipeline arranges the independent reviews, and you "
+            "cannot ask the user questions, so state any assumption you make in "
+            "`readiness.md`. Follow the profile for presentation, structure, "
+            "style, notation, and figures. It adds writing criteria; it does "
+            "not change the required files, the structured response, "
+            "traceability, citation verification, or the rule that `main.tex` "
+            "keeps the internal workflow out. Where it conflicts with the "
+            "preferred paper structure below, follow the profile and note the "
+            "choice in `readiness.md`."
+        )
+    if audience is not None:
+        mode += f"\n\nWrite for this audience: {audience}"
     if revision_instruction is not None:
         direction_kind = "revision" if previous is not None else "first-draft"
         mode += (
@@ -944,9 +1266,10 @@ def render_reviewer_prompt(
     template: str,
     *,
     context: Path,
+    writing_profile: WritingProfile | None = None,
 ) -> str:
     manuscript = context / "manuscript"
-    return (
+    prompt = (
         template.replace(
             "{{MANUSCRIPT_DIRECTORY}}",
             codex_cli.path_for_codex(manuscript),
@@ -954,6 +1277,70 @@ def render_reviewer_prompt(
             "{{CONTEXT_DIRECTORY}}",
             codex_cli.path_for_codex(context),
         )
+    )
+    if writing_profile is not None:
+        prompt = prompt.rstrip() + "\n\n" + _profile_instruction(
+            writing_profile,
+            "inputs/writing-profile",
+            "for reviewing a manuscript",
+        ) + (
+            " Use it as the presentation criteria of this review; where it "
+            "differs from the outline above, it takes precedence. It never "
+            "relaxes the mathematical, citation, self-containment, or "
+            "workflow-leak requirements.\n"
+        )
+    return prompt
+
+
+def _profile_instruction(profile: WritingProfile, location: str, task: str) -> str:
+    """How an agent reads the profile: from its entry point, for its own task."""
+    files = ", ".join(f"`{path}`" for path, _, _ in profile.files)
+    if profile.entry is None:
+        return (
+            f"The authors' writing profile `{profile.name}` is staged read-only "
+            f"under `{location}/` ({files})."
+        )
+    return (
+        f"The authors' writing profile `{profile.name}` is staged read-only "
+        f"under `{location}/` ({files}). Start with `{location}/{profile.entry}`: "
+        "it is the entry point and says which of the other files apply to "
+        f"which task. Read the files it directs you to {task}; treat the rest "
+        "as background, not as instructions for this run. Its advice on asking "
+        "the user, on running reviews across agents or models, and on "
+        "developing the profile itself does not apply here."
+    )
+
+
+def render_exposition_prompt(
+    template: str,
+    *,
+    context: Path,
+    audience: str,
+    writing_profile: WritingProfile | None = None,
+) -> str:
+    if writing_profile is None:
+        criteria = (
+            "No writing profile was given; apply the general checks below."
+        )
+    else:
+        criteria = _profile_instruction(
+            writing_profile,
+            "writing-profile",
+            "for reading or reviewing a manuscript",
+        ) + (
+            " Apply its criteria for exposition as review criteria; where they "
+            "ask for something the general checks below do not, they take "
+            "precedence. Its instructions for editing the text are not part "
+            "of your task."
+        )
+    return (
+        template.replace(
+            "{{MANUSCRIPT_DIRECTORY}}",
+            codex_cli.path_for_codex(context / "manuscript"),
+        )
+        .replace("{{CONTEXT_DIRECTORY}}", codex_cli.path_for_codex(context))
+        .replace("{{AUDIENCE}}", audience)
+        .replace("{{CRITERIA_INSTRUCTION}}", criteria)
     )
 
 
@@ -1037,12 +1424,43 @@ def _generated_files(workspace: Path, values: object) -> list[Path]:
     return paths
 
 
-def _previous_finding_ids(previous: DraftRef | None) -> set[str]:
+def _exposition_finding_ids(previous: DraftRef | None) -> set[str]:
     if previous is None:
         return set()
-    review_path = previous.directory / "paper-review.json"
+    review_path = previous.directory / "exposition-review.json"
     if not review_path.is_file():
         return set()
+    review = common.read_json(
+        review_path,
+        description=f"exposition review for {previous.directory}",
+    )
+    findings = review.get("findings")
+    if not isinstance(findings, list):
+        raise common.CodexError("previous exposition review has invalid findings")
+    ids = {
+        finding.get("id")
+        for finding in findings
+        if isinstance(finding, dict) and isinstance(finding.get("id"), str)
+    }
+    if len(ids) != len(findings):
+        raise common.CodexError(
+            "previous exposition review has invalid finding IDs"
+        )
+    return ids
+
+
+def _previous_finding_ids(
+    previous: DraftRef | None,
+    *,
+    exposition: bool = False,
+) -> set[str]:
+    """Findings the next draft must address: the critic's, and the reader's if staged."""
+    if previous is None:
+        return set()
+    ids = _exposition_finding_ids(previous) if exposition else set()
+    review_path = previous.directory / "paper-review.json"
+    if not review_path.is_file():
+        return ids
     review = common.read_json(
         review_path,
         description=f"paper review for {previous.directory}",
@@ -1050,14 +1468,14 @@ def _previous_finding_ids(previous: DraftRef | None) -> set[str]:
     findings = review.get("findings")
     if not isinstance(findings, list):
         raise common.CodexError("previous paper review has invalid findings")
-    ids = {
+    critic_ids = {
         finding.get("id")
         for finding in findings
         if isinstance(finding, dict) and isinstance(finding.get("id"), str)
     }
-    if len(ids) != len(findings):
+    if len(critic_ids) != len(findings):
         raise common.CodexError("previous paper review has invalid finding IDs")
-    return ids
+    return ids | critic_ids
 
 
 def _previous_addressed_finding_ids(previous: DraftRef | None) -> set[str]:
@@ -1156,6 +1574,7 @@ def validate_paper_result(
     *,
     previous: DraftRef | None = None,
     authors: Sequence[str] | None = None,
+    exposition: bool = False,
 ) -> tuple[dict, list[Path]]:
     """Validate and normalize pre-checker paper output for recovery/tests."""
     result = common.read_json(result_path, description="paper response")
@@ -1239,7 +1658,7 @@ def validate_paper_result(
         )
     if status == "blocked" and not unresolved:
         raise common.CodexError("blocked paper has no unresolved issues")
-    previous_ids = _previous_finding_ids(previous)
+    previous_ids = _previous_finding_ids(previous, exposition=exposition)
     historical_ids = _previous_addressed_finding_ids(previous)
     addressed = result.get("addressed_findings")
     if not isinstance(addressed, list):
@@ -1571,6 +1990,9 @@ def _install_draft(
     codex_version: str,
     options: codex_cli.ModelOptions,
     web_search: str,
+    writing_profile: WritingProfile | None = None,
+    audience: str | None = None,
+    exposition_review: dict | None = None,
 ) -> DraftRef:
     destination = manuscript_directory / f"draft-{draft_number:03d}"
     if destination.exists():
@@ -1595,6 +2017,14 @@ def _install_draft(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
         common.write_json(staging / "paper-result.json", result)
+        # Only drafts written with these options record them.
+        optional = {}
+        if writing_profile is not None:
+            optional["writing_profile"] = writing_profile.record(manuscript_directory)
+        if audience is not None:
+            optional["audience"] = audience
+        if exposition_review is not None:
+            optional["exposition_review"] = exposition_review
         common.write_json(
             staging / "manifest.json",
             {
@@ -1635,6 +2065,7 @@ def _install_draft(
                 "requested_web_search": web_search,
                 "status": result["status"],
                 "title": result["title"],
+                **optional,
             },
         )
         os.replace(staging, destination)
@@ -1678,14 +2109,29 @@ def run_author_round(
     options: codex_cli.ModelOptions,
     web_search: str = "live",
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    writing_profile: WritingProfile | None = None,
+    audience: str | None = None,
+    exposition_review: dict | None = None,
 ) -> DraftRef:
+    """One writer (or, for a revision, editor) turn; installs the next draft.
+
+    With `exposition_review` set, the previous draft's current exposition
+    report is staged next to the critic's and its findings must be addressed.
+    """
     manuscript_directory.mkdir(parents=True, exist_ok=True)
     workspace = Path(
         tempfile.mkdtemp(prefix=".write-run-", dir=manuscript_directory)
     ).resolve()
     draft_number = next_draft_number(manuscript_directory)
     try:
-        context = stage_paper_context(workspace, inputs, manuscript=previous)
+        with_exposition = exposition_review is not None and previous is not None
+        context = stage_paper_context(
+            workspace,
+            inputs,
+            manuscript=previous,
+            include_manuscript_exposition=with_exposition,
+            writing_profile=writing_profile,
+        )
         prompt = render_writer_prompt(
             prompt_template,
             context=context,
@@ -1693,6 +2139,9 @@ def run_author_round(
             title_hint=title_hint,
             previous=previous,
             revision_instruction=revision_instruction,
+            writing_profile=writing_profile,
+            audience=audience,
+            exposition_review=with_exposition,
         )
         expectations = {
             "result_ids": [item.result_id for item in inputs],
@@ -1705,7 +2154,9 @@ def run_author_round(
                 ]
                 for item in inputs
             },
-            "previous_finding_ids": sorted(_previous_finding_ids(previous)),
+            "previous_finding_ids": sorted(
+                _previous_finding_ids(previous, exposition=with_exposition)
+            ),
             "historical_finding_ids": sorted(
                 _previous_addressed_finding_ids(previous)
             ),
@@ -1751,6 +2202,9 @@ def run_author_round(
             codex_version=codex_version,
             options=options,
             web_search=web_search,
+            writing_profile=writing_profile,
+            audience=audience,
+            exposition_review=exposition_review,
         )
     except (common.CodexError, OSError) as exc:
         raise common.CodexError(
@@ -1906,18 +2360,25 @@ def run_paper_review(
     options: codex_cli.ModelOptions,
     web_search: str = "live",
     launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+    writing_profile: WritingProfile | None = None,
 ) -> PaperReview:
     workspace = Path(
         tempfile.mkdtemp(prefix=".paper-review-run-", dir=manuscript_directory)
     ).resolve()
     try:
+        # The full-context critic never sees the exposition report.
         context = stage_paper_context(
             workspace,
             inputs,
             manuscript=draft,
             include_manuscript_review=False,
+            writing_profile=writing_profile,
         )
-        prompt = render_reviewer_prompt(prompt_template, context=context)
+        prompt = render_reviewer_prompt(
+            prompt_template,
+            context=context,
+            writing_profile=writing_profile,
+        )
         expectations = {
             "result_ids": [item.result_id for item in inputs],
             "claim_ids": sorted(
@@ -2007,6 +2468,147 @@ def run_paper_review(
     return PaperReview(draft, result)
 
 
+def serious_exposition_findings(review: ExpositionReview | None) -> list[str]:
+    """IDs of the reader's blocking or major findings; these keep a draft in revision."""
+    if review is None:
+        return []
+    return [
+        finding["id"]
+        for finding in review.result.get("findings", [])
+        if isinstance(finding, dict) and finding.get("severity") in SERIOUS_SEVERITIES
+    ]
+
+
+def exposition_review_is_current(draft: DraftRef, *, config_digest: str) -> bool:
+    manifest = common.load_json(draft.directory / "exposition-review-manifest.json")
+    result = common.load_json(draft.directory / "exposition-review.json")
+    if manifest is None or result is None:
+        return False
+    return (
+        manifest.get("schema_version") == 1
+        and manifest.get("draft_digest") == _draft_digest(draft)
+        and manifest.get("config_digest") == config_digest
+        and result.get("verdict") in exposition_review_validation.VERDICTS
+    )
+
+
+def run_exposition_review(
+    manuscript_directory: Path,
+    draft: DraftRef,
+    *,
+    codex: str,
+    codex_version: str,
+    settings: ExpositionSettings,
+    audience: str,
+    writing_profile: WritingProfile | None = None,
+    launch_interval: float = codex_cli.CODEX_LAUNCH_INTERVAL_SECONDS,
+) -> ExpositionReview:
+    """Review the draft as a reader would: the paper only, in its own workspace.
+
+    The workspace lies outside the manuscript directory, so that neither
+    readiness notes, earlier drafts nor the critic's report sit next to it.
+    The sandbox does not forbid reading elsewhere; the prompt does.
+    """
+    workspace = Path(tempfile.mkdtemp(prefix="loose-ends-exposition-")).resolve()
+    try:
+        context = stage_exposition_context(
+            workspace,
+            draft,
+            audience=audience,
+            writing_profile=writing_profile,
+        )
+        prompt = render_exposition_prompt(
+            settings.prompt_template,
+            context=context,
+            audience=audience,
+            writing_profile=writing_profile,
+        )
+        report = codex_cli.run_validated_codex(
+            codex=codex,
+            workspace=workspace,
+            prompt=prompt,
+            schema_path=settings.schema_path,
+            validator=codex_cli.OutputValidator(
+                Path(exposition_review_validation.__file__).resolve(),
+                exposition_review_validation.validate,
+                {},
+            ),
+            options=settings.options,
+            web_search=settings.web_search,
+            launch_interval=launch_interval,
+        )
+        result = codex_cli.validated_result(report)
+        staging = Path(
+            tempfile.mkdtemp(prefix=".exposition-install-", dir=draft.directory)
+        )
+        try:
+            shutil.copyfile(
+                workspace / "exposition-review.md",
+                staging / "exposition-review.md",
+            )
+            common.write_json(staging / "exposition-review.json", result)
+            common.write_json(
+                staging / "exposition-review-manifest.json",
+                {
+                    "schema_version": 1,
+                    "generated_at": common.utc_now(),
+                    "draft_digest": _draft_digest(draft),
+                    "config_digest": settings.config_digest,
+                    "audience": audience,
+                    "writing_profile": (
+                        writing_profile.summary() if writing_profile else None
+                    ),
+                    "staged_files": sorted(
+                        path.relative_to(context).as_posix()
+                        for path in context.rglob("*")
+                        if path.is_file()
+                    ),
+                    "codex_version": codex_version,
+                    "requested_model": settings.options.model,
+                    **codex_cli.agent_provenance(settings.options),
+                    "requested_reasoning_effort": settings.options.reasoning_effort,
+                    "requested_fast_mode": settings.options.fast,
+                    "requested_service_tier": settings.options.service_tier,
+                    "requested_web_search": settings.web_search,
+                    "verdict": result["verdict"],
+                },
+            )
+            shutil.copyfile(
+                workspace / "events.jsonl",
+                staging / "exposition-events.jsonl",
+            )
+            shutil.copyfile(workspace / "run.log", staging / "exposition-run.log")
+            for name in (
+                "exposition-review.md",
+                "exposition-review.json",
+                "exposition-review-manifest.json",
+                "exposition-events.jsonl",
+                "exposition-run.log",
+            ):
+                os.replace(staging / name, draft.directory / name)
+            shutil.rmtree(staging)
+        except OSError as exc:
+            raise common.CodexError(
+                "could not install exposition review; staging preserved at "
+                f"{staging}: {exc}"
+            ) from exc
+        common.report_artifacts(
+            (
+                draft.directory / "exposition-review.md",
+                draft.directory / "exposition-review.json",
+            )
+        )
+    except (common.CodexError, OSError) as exc:
+        raise common.CodexError(
+            common.preserved_workspace_message(exc, workspace)
+        ) from exc
+    common.cleanup_workspace(
+        workspace,
+        installed_log=draft.directory / "exposition-run.log",
+    )
+    return ExpositionReview(draft, result)
+
+
 def run_pipeline(
     manuscript_directory: Path,
     inputs: Sequence[PaperInput],
@@ -2031,10 +2633,67 @@ def run_pipeline(
     force_author_round: bool = False,
     web_search: str = "live",
     review_web_search: str = "live",
+    writing_profile: WritingProfile | None = None,
+    audience: str | None = None,
+    exposition: ExpositionSettings | None = None,
 ) -> PipelineOutcome:
+    """Author and critic rounds until a stop verdict or the round limit.
+
+    Without `exposition` the critic's verdict alone decides, as before. With
+    it, a manuscript-only reader also reviews every draft the critic does not
+    send back to research; each revision (the editor round) addresses both
+    reports, and a draft the critic finds ready is revised again, within the
+    round limit, while the reader reports a blocking or major finding.
+    """
     drafts: list[DraftRef] = []
     final_review: PaperReview | None = None
+    final_exposition: ExpositionReview | None = None
     current_previous = previous
+    reader_audience = audience or DEFAULT_AUDIENCE
+    exposition_record = (
+        None
+        if exposition is None
+        else {
+            "enabled": True,
+            "config_digest": exposition.config_digest,
+            **codex_cli.agent_provenance(exposition.options),
+            "requested_model": exposition.options.model,
+        }
+    )
+
+    def ensure_exposition(draft: DraftRef) -> ExpositionReview:
+        if exposition_review_is_current(draft, config_digest=exposition.config_digest):
+            return ExpositionReview(
+                draft,
+                common.read_json(
+                    draft.directory / "exposition-review.json",
+                    description=f"exposition review for {draft.directory}",
+                ),
+            )
+        review = run_exposition_review(
+            manuscript_directory,
+            draft,
+            codex=codex,
+            codex_version=codex_version,
+            settings=exposition,
+            audience=reader_audience,
+            writing_profile=writing_profile,
+        )
+        print(
+            f"Completed exposition review: {draft.directory} "
+            f"({review.result['verdict']})",
+            flush=True,
+        )
+        return review
+
+    def review_exposition(draft: DraftRef, verdict: str) -> ExpositionReview | None:
+        if exposition is None or verdict in EXPOSITION_SKIP_VERDICTS:
+            return None
+        return ensure_exposition(draft)
+
+    def open_exposition(review: ExpositionReview | None) -> list[str]:
+        return serious_exposition_findings(review)
+
     if (
         current_previous is not None
         and revision_instruction is None
@@ -2062,6 +2721,7 @@ def run_pipeline(
                 config_digest=review_config_digest,
                 options=review_options,
                 web_search=review_web_search,
+                writing_profile=writing_profile,
             )
             saved_review = final_review.result
             reviewed_now = True
@@ -2071,11 +2731,17 @@ def run_pipeline(
                 flush=True,
             )
         if reviewed_now and saved_review.get("verdict") == "ready_for_expert_review":
-            return PipelineOutcome(
-                tuple(drafts),
-                final_review,
-                "ready_for_expert_review",
+            final_exposition = review_exposition(
+                current_previous, "ready_for_expert_review"
             )
+            if not open_exposition(final_exposition):
+                return PipelineOutcome(
+                    tuple(drafts),
+                    final_review,
+                    "ready_for_expert_review",
+                    final_exposition,
+                )
+            # The reader still reports a serious problem: revise below.
         if saved_review.get("verdict") in {"invalid", "needs_research"}:
             return PipelineOutcome(
                 tuple(drafts),
@@ -2084,6 +2750,9 @@ def run_pipeline(
             )
     for _ in range(max_rounds):
         is_revision = current_previous is not None
+        if is_revision and exposition is not None:
+            # The editor gets the reader's report on the draft it revises.
+            final_exposition = ensure_exposition(current_previous)
         draft = run_author_round(
             manuscript_directory,
             inputs,
@@ -2100,6 +2769,9 @@ def run_pipeline(
             config_digest=config_digest,
             options=options,
             web_search=web_search,
+            writing_profile=writing_profile,
+            audience=audience,
+            exposition_review=exposition_record,
         )
         drafts.append(draft)
         author_round_name = "revision" if is_revision else "draft"
@@ -2118,18 +2790,36 @@ def run_pipeline(
             config_digest=review_config_digest,
             options=review_options,
             web_search=review_web_search,
+            writing_profile=writing_profile,
         )
         verdict = final_review.result["verdict"]
         print(
             f"Completed review: {draft.directory} ({verdict})",
             flush=True,
         )
+        final_exposition = review_exposition(draft, verdict)
         if verdict == "ready_for_expert_review":
-            return PipelineOutcome(tuple(drafts), final_review, verdict)
-        if verdict not in REVISION_VERDICTS:
-            return PipelineOutcome(tuple(drafts), final_review, verdict)
+            if not open_exposition(final_exposition):
+                return PipelineOutcome(
+                    tuple(drafts), final_review, verdict, final_exposition
+                )
+            print(
+                f"The critic finds {draft.directory.name} ready; the exposition "
+                "reader reports " + ", ".join(open_exposition(final_exposition))
+                + ", so another round follows if the limit allows.",
+                flush=True,
+            )
+        elif verdict not in REVISION_VERDICTS:
+            return PipelineOutcome(tuple(drafts), final_review, verdict, final_exposition)
         current_previous = draft
-    return PipelineOutcome(tuple(drafts), final_review, "maximum rounds reached")
+    reason = "maximum rounds reached"
+    if (
+        final_review is not None
+        and final_review.result.get("verdict") == "ready_for_expert_review"
+        and open_exposition(final_exposition)
+    ):
+        reason = OPEN_EXPOSITION_REASON
+    return PipelineOutcome(tuple(drafts), final_review, reason, final_exposition)
 
 
 def _inherit_options(
@@ -2243,6 +2933,12 @@ def build_parser() -> argparse.ArgumentParser:
   Refresh a pinned or legacy draft from all latest paper results:
     python src/write_paper.py --revise manuscripts/.../draft-001 \\
       --refresh-results
+
+  Write to a writing profile and add a manuscript-only exposition reader:
+    python src/write_paper.py papers/edemaine/arXiv-.../OP-001/attempt-003 \\
+      --writing-profile ~/writing/computational-geometry-writing \\
+      --exposition-review --exposition-agent claude \\
+      --audience "computational geometers (SoCG)" --max-rounds 2
 """,
     )
     parser.add_argument(
@@ -2347,7 +3043,125 @@ def build_parser() -> argparse.ArgumentParser:
     codex_cli.add_model_arguments(parser, prefix="review")
     codex_cli.add_web_search_argument(parser, default="live")
     codex_cli.add_web_search_argument(parser, default="live", prefix="review")
+    profile = parser.add_argument_group(
+        "writing profile and exposition review (optional)"
+    )
+    profile.add_argument(
+        "--writing-profile",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "file or directory of writing criteria, e.g. a skill folder; its "
+            "text files are copied into the manuscript's writing-profiles/ and "
+            "staged for the writer, the critic, and the exposition reviewer. "
+            "A revision reuses the profile of the draft it revises"
+        ),
+    )
+    profile.add_argument(
+        "--writing-profile-exclude",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help=(
+            "leave out profile files matching this glob, relative to the "
+            "profile directory (e.g. 'references/evaluation.md' or 'agents/*'); "
+            "may be repeated"
+        ),
+    )
+    profile.add_argument(
+        "--no-writing-profile",
+        action="store_true",
+        help="revise without the writing profile the draft was written with",
+    )
+    profile.add_argument(
+        "--audience",
+        metavar="TEXT",
+        help=(
+            "intended readers, for the writer and the exposition reviewer "
+            f"(default with these options: {DEFAULT_AUDIENCE})"
+        ),
+    )
+    profile.add_argument(
+        "--exposition-review",
+        action="store_true",
+        help=(
+            "also have each reviewed draft read by a reader who sees only the "
+            "manuscript, its figures and bibliography, the audience, and the "
+            "writing profile; each revision addresses both reports. The "
+            "critic's verdict alone decides whether another round runs"
+        ),
+    )
+    profile.add_argument(
+        "--no-exposition-review",
+        action="store_true",
+        help="revise without the exposition review the draft was written with",
+    )
+    codex_cli.add_prompt_arguments(
+        profile,
+        default_template=DEFAULT_EXPOSITION_PROMPT_PATH,
+        task="exposition reviewer",
+        prefix="exposition",
+    )
+    profile.add_argument(
+        "--exposition-schema",
+        type=Path,
+        default=DEFAULT_EXPOSITION_SCHEMA_PATH,
+    )
+    codex_cli.add_model_arguments(profile, prefix="exposition")
+    profile.add_argument(
+        "--exposition-web-search",
+        choices=codex_cli.WEB_SEARCH_MODES,
+        default="disabled",
+        metavar="MODE",
+        help=(
+            "web search for the exposition reviewer (default: disabled, "
+            "because the reader should judge only what the paper provides)"
+        ),
+    )
     return parser
+
+
+def _optional_settings(
+    args: argparse.Namespace,
+    prior_manifest: dict,
+    manuscript_directory: Path,
+) -> tuple[WritingProfile | dict | None, str | None, bool]:
+    """Writing profile (stored copy or a source to load), audience, exposition.
+
+    A revision inherits the settings of the draft it revises, like its authors
+    and title, unless the --no-* options switch them off.
+    """
+    if args.writing_profile is not None and args.no_writing_profile:
+        raise common.CodexError(
+            "--writing-profile and --no-writing-profile exclude each other"
+        )
+    if args.exposition_review and args.no_exposition_review:
+        raise common.CodexError(
+            "--exposition-review and --no-exposition-review exclude each other"
+        )
+    if args.audience is not None and not args.audience.strip():
+        raise common.CodexError("--audience must be nonempty")
+    if args.writing_profile_exclude and args.writing_profile is None:
+        raise common.CodexError("--writing-profile-exclude needs --writing-profile")
+    profile: WritingProfile | dict | None = None
+    if args.writing_profile is not None:
+        name, digest, files, _ = read_writing_profile(
+            args.writing_profile, args.writing_profile_exclude
+        )
+        profile = {"source": args.writing_profile, "name": name, "digest": digest,
+                   "files": files}
+    elif not args.no_writing_profile and prior_manifest.get("writing_profile"):
+        profile = stored_writing_profile(
+            prior_manifest["writing_profile"], manuscript_directory
+        )
+    exposition = args.exposition_review or (
+        not args.no_exposition_review
+        and bool((prior_manifest.get("exposition_review") or {}).get("enabled"))
+    )
+    audience = args.audience.strip() if args.audience else prior_manifest.get("audience")
+    if audience is None and (profile is not None or exposition):
+        audience = DEFAULT_AUDIENCE
+    return profile, audience, exposition
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2411,6 +3225,18 @@ def main(argv: list[str] | None = None) -> int:
             title_hint = args.title_hint
         if not all(isinstance(author, str) and author.strip() for author in authors):
             raise common.CodexError("every --author must be nonempty")
+        profile_setting, audience, exposition_enabled = _optional_settings(
+            args,
+            prior_manifest if args.revise else {},
+            manuscript_directory,
+        )
+        profile_digest = (
+            None
+            if profile_setting is None
+            else profile_setting.digest
+            if isinstance(profile_setting, WritingProfile)
+            else profile_setting["digest"]
+        )
 
         prompt_path = args.prompt_template.expanduser().resolve()
         schema_path = args.schema.expanduser().resolve()
@@ -2418,12 +3244,16 @@ def main(argv: list[str] | None = None) -> int:
         schema_text = _read_text(schema_path, "paper schema")
         json.loads(schema_text)
         options = codex_cli.model_options_from_args(args)
-        config_digest = codex_cli.semantic_config_digest(
-            prompt_template,
-            schema_text,
-            options,
-            web_search=args.web_search,
-            validation_source=Path(paper_validation.__file__).resolve(),
+        config_digest = _with_extras(
+            codex_cli.semantic_config_digest(
+                prompt_template,
+                schema_text,
+                options,
+                web_search=args.web_search,
+                validation_source=Path(paper_validation.__file__).resolve(),
+            ),
+            writing_profile=profile_digest,
+            audience=audience,
         )
         review_prompt_path = args.review_prompt_template.expanduser().resolve()
         review_schema_path = args.review_schema.expanduser().resolve()
@@ -2444,15 +3274,57 @@ def main(argv: list[str] | None = None) -> int:
             codex_cli.model_options_from_args(args, prefix="review"),
         )
         review_web_search = args.review_web_search or args.web_search
-        review_config_digest = codex_cli.semantic_config_digest(
-            review_prompt,
-            review_schema_text,
-            review_options,
-            web_search=review_web_search,
-            validation_source=Path(
-                paper_review_validation.__file__
-            ).resolve(),
+        review_config_digest = _with_extras(
+            codex_cli.semantic_config_digest(
+                review_prompt,
+                review_schema_text,
+                review_options,
+                web_search=review_web_search,
+                validation_source=Path(
+                    paper_review_validation.__file__
+                ).resolve(),
+            ),
+            writing_profile=profile_digest,
         )
+        exposition_settings = None
+        if exposition_enabled:
+            exposition_prompt = codex_cli.with_user_prompt(
+                _read_text(
+                    args.exposition_prompt_template.expanduser().resolve(),
+                    "exposition-review prompt",
+                ),
+                args.exposition_prompt,
+                task="exposition reviewer",
+                option_name="--exposition-prompt",
+            )
+            exposition_schema_path = args.exposition_schema.expanduser().resolve()
+            exposition_schema_text = _read_text(
+                exposition_schema_path, "exposition-review schema"
+            )
+            json.loads(exposition_schema_text)
+            exposition_options = _inherit_options(
+                review_options,
+                codex_cli.model_options_from_args(args, prefix="exposition"),
+            )
+            exposition_settings = ExpositionSettings(
+                prompt_template=exposition_prompt,
+                schema_path=exposition_schema_path,
+                config_digest=_with_extras(
+                    codex_cli.semantic_config_digest(
+                        exposition_prompt,
+                        exposition_schema_text,
+                        exposition_options,
+                        web_search=args.exposition_web_search,
+                        validation_source=Path(
+                            exposition_review_validation.__file__
+                        ).resolve(),
+                    ),
+                    writing_profile=profile_digest,
+                    audience=audience,
+                ),
+                options=exposition_options,
+                web_search=args.exposition_web_search,
+            )
     except (
         common.CodexError,
         OSError,
@@ -2481,14 +3353,61 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.revision_instruction is not None:
             print(f"Writer direction: {args.revision_instruction}")
+        if profile_setting is not None:
+            name = (
+                profile_setting.name
+                if isinstance(profile_setting, WritingProfile)
+                else profile_setting["name"]
+            )
+            count = len(
+                profile_setting.files
+                if isinstance(profile_setting, WritingProfile)
+                else profile_setting["files"]
+            )
+            print(f"Writing profile: {name} ({profile_digest[:12]}, {count} file(s))")
+            files = (
+                [path for path, _, _ in profile_setting.files]
+                if isinstance(profile_setting, WritingProfile)
+                else [path for path, _, _ in profile_setting["files"]]
+            )
+            print("  files: " + ", ".join(files))
+        if audience is not None:
+            print(f"Audience: {audience}")
+        if exposition_settings is not None:
+            print(
+                "Exposition review: "
+                f"{exposition_settings.options.agent_name}"
+                f"/{exposition_settings.options.model or 'default model'}, "
+                f"web search {exposition_settings.web_search}"
+            )
         return 0
 
     try:
         codex, codex_version = codex_cli.codex_runtime(
-            args.codex, options, review_options
+            args.codex,
+            options,
+            review_options,
+            *([exposition_settings.options] if exposition_settings else []),
         )
         latexmk = resolve_latexmk(args.latexmk)
         manuscript_directory.mkdir(parents=True, exist_ok=True)
+        writing_profile = profile_setting
+        if isinstance(profile_setting, dict):
+            writing_profile = load_writing_profile(
+                profile_setting["source"],
+                manuscript_directory,
+                args.writing_profile_exclude,
+            )
+            if writing_profile.digest != profile_digest:
+                raise common.CodexError(
+                    "the writing profile changed while starting; run again"
+                )
+        if writing_profile is not None:
+            print(
+                f"Writing profile: {writing_profile.name} "
+                f"({writing_profile.digest[:12]}), stored at {writing_profile.directory}",
+                flush=True,
+            )
         print(
             f"Writing one manuscript from {len(inputs)} selected result(s), "
             f"with at most {args.max_rounds} author-review round(s).",
@@ -2533,16 +3452,38 @@ def main(argv: list[str] | None = None) -> int:
             force_author_round=selection_changed,
             web_search=args.web_search,
             review_web_search=review_web_search,
+            writing_profile=writing_profile,
+            audience=audience,
+            exposition=exposition_settings,
         )
     except (common.CodexError, OSError) as exc:
         print(f"Paper writing failed: {exc}", file=sys.stderr)
         return 1
 
+    exposition_note = None
+    if outcome.final_exposition is not None:
+        serious = serious_exposition_findings(outcome.final_exposition)
+        exposition_note = (
+            f"  {outcome.final_exposition.draft.directory / 'exposition-review.md'} "
+            f"({outcome.final_exposition.result.get('verdict')}"
+            + (f"; blocking or major: {', '.join(serious)}" if serious else "")
+            + ")"
+        )
     if outcome.ready and outcome.final_review is not None:
         print("Ready for human expert review:")
         print(f"  {outcome.final_review.draft.directory / 'main.pdf'}")
         print(f"  {outcome.final_review.draft.directory / 'paper-critique.md'}")
+        if exposition_note:
+            print(exposition_note)
         return 0
+    if exposition_note:
+        print(exposition_note, file=sys.stderr)
+    if outcome.reason == OPEN_EXPOSITION_REASON:
+        print(
+            "The critic finds the last draft ready for expert review; revise it "
+            "again (--revise) to address the exposition findings.",
+            file=sys.stderr,
+        )
     print(f"Stopped: {outcome.reason}", file=sys.stderr)
     if outcome.final_review is not None:
         print(
