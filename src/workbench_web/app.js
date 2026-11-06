@@ -16,6 +16,7 @@ const state = {
     paperRoots: [],
     paperTargets: [],
     labelCommand: false,
+    projects: [],
     taskDefaults: {},
   },
   tab: "research",
@@ -1776,6 +1777,10 @@ function organizeFilterNodes(kind) {
     return wrapper;
   };
   const nodes = [];
+  const projects = reviewModel.projectOptions(rows);
+  if (projects.length > 2 || filters().project !== "all") {
+    nodes.push(select("Project", "project", projects));
+  }
   const collections = reviewModel.collectionOptions(rows);
   if (collections.length > 2 || filters().collection !== "all") {
     nodes.push(select("Collection", "collection", collections));
@@ -1834,6 +1839,9 @@ function organizeTagsNode(item) {
 
 function labelBadges(item) {
   const wrapper = node("div", "badges label-badges");
+  if (item.project?.name && (state.settings.projects || []).length > 1) {
+    wrapper.append(node("span", "badge project", `project ${item.project.name}`));
+  }
   if (item.collection) wrapper.append(node("span", "badge collection", `collection ${item.collection}`));
   (item.labels || []).forEach(label => {
     const value = node("span", `badge ${label.hidden ? "warn" : "label"}`, label.label);
@@ -2211,10 +2219,11 @@ function renderResearch() {
       + hiddenNote(state.catalog.reviews, state.researchFilters)));
   for (const group of paperGroups) {
     const paperHeading = node("div", "sidebar-heading paper-heading");
+    const groupProject = group.problems[0]?.project?.name;
     const paperHeadingLabel = reviewModel.paperTitleWithYear(
       group.paperTitle,
       group.publicationTimestamp,
-    );
+    ) + (groupProject && (state.settings.projects || []).length > 1 ? ` · ${groupProject}` : "");
     const paperHeadingTitle = inlineMarkdown("span", "paper-heading-title", paperHeadingLabel);
     paperHeadingTitle.title = paperHeadingLabel;
     paperHeading.append(
@@ -2561,7 +2570,7 @@ function renderReviewDetail(item) {
   copy.append(inlineMarkdown("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
   copy.append(inlineMarkdown("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
-  if (item.collection || item.labels?.length) copy.append(labelBadges(item));
+  if (item.project || item.collection || item.labels?.length) copy.append(labelBadges(item));
   hero.append(copy, heroActions("problem", item));
   shell.append(hero);
 
@@ -2815,7 +2824,8 @@ function renderPapers() {
       paper.title,
       paper.publicationTimestamp,
     ),
-    meta: paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed",
+    meta: (paper.project?.name && (state.settings.projects || []).length > 1 ? `${paper.project.name} · ` : "")
+      + (paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed"),
     tags: reviewModel.organizeTags(paper).length ? organizeTagsNode(paper) : undefined,
     active: state.selectedPaper === paper.key,
     selectedTarget: paperTarget(paper),
@@ -2868,7 +2878,7 @@ function renderPapers() {
   badges.append(badge(paper.analyzed ? "analyzed" : "not analyzed", paper.analyzed ? "succeeded" : "warn"));
   if (paper.analyzed) badges.append(badge(`${paper.problemCount} problems`, "neutral"));
   copy.append(badges);
-  if (paper.collection || paper.labels?.length) copy.append(labelBadges(paper));
+  if (paper.project || paper.collection || paper.labels?.length) copy.append(labelBadges(paper));
   hero.append(copy, heroActions("paper", paper));
   shell.append(hero);
   const actions = node("div", "actions");
@@ -3509,6 +3519,9 @@ function renderManuscripts() {
   copy.append(node("div", "eyebrow", `${manuscript.name} · ${draft.name}`));
   copy.append(inlineMarkdown("h1", "", draft.title));
   const badges = node("div", "badges");
+  if (manuscript.project?.name && (state.settings.projects || []).length > 1) {
+    badges.append(node("span", "badge project", `project ${manuscript.project.name}`));
+  }
   badges.append(badge(draft.status || "draft", "neutral"));
   badges.append(badge(draft.verdict, draft.verdict === "ready_for_expert_review" ? "succeeded" : "warn"));
   if (draft.expositionVerdict) {

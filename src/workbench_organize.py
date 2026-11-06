@@ -40,7 +40,7 @@ as destinations for added papers (`import_targets`).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import hashlib
 import json
 import os
@@ -72,6 +72,10 @@ class Label:
     hidden: bool = False
     title: str = ""
     skip: bool = False
+    root: str = ""  # the paper root it describes; empty: every root
+
+    def covers(self, root: str) -> bool:
+        return not self.root or self.root == root
 
     def record(self) -> dict:
         return {"label": self.label, "hidden": self.hidden, "title": self.title}
@@ -88,6 +92,8 @@ class LabelAction:
     title: str = ""
     fields: tuple = field(default=(), compare=False)  # dicts, as in the file
     values: tuple = ()  # (name, value) pairs
+    root: str = ""  # the paper root it acts on; empty: every root
+    source: str = ""  # the labels file that declared it (selects the command)
 
     @property
     def key(self) -> str:
@@ -101,12 +107,16 @@ class LabelAction:
             "target": self.target, "fields": [dict(item) for item in self.fields],
             "values": dict(self.values),
         }
+        if self.root:
+            value["root"] = self.root
         if with_key:
             value["key"] = self.key
         return value
 
-    def applies_to(self, kind: str, target: str) -> bool:
+    def applies_to(self, kind: str, target: str, root: str = "") -> bool:
         if kind not in self.kinds:
+            return False
+        if self.root and root and self.root != root:
             return False
         if not self.target:
             return True
@@ -164,6 +174,14 @@ def _read_field(raw: object, where: str) -> tuple[dict | None, str]:
     return value, ""
 
 
+def _scope(value: dict, root: str) -> str:
+    """A labels file's own "root" wins over the scope the workbench assigns it."""
+    declared = value.get("root")
+    if isinstance(declared, str) and declared.strip():
+        return str(Path(declared).expanduser().resolve())
+    return root
+
+
 def _read_action(raw: object, where: str) -> tuple[LabelAction | None, list[str]]:
     if not isinstance(raw, dict):
         return None, [f"{where} is not an object"]
@@ -201,11 +219,12 @@ def _read_action(raw: object, where: str) -> tuple[LabelAction | None, list[str]
     ), []
 
 
-def read_actions(path: Path) -> tuple[list[LabelAction], list[str]]:
+def read_actions(path: Path, root: str = "") -> tuple[list[LabelAction], list[str]]:
     """Label actions of one file, and problems with its entries."""
     value, errors = _load_file(path)
     if value is None:
         return [], errors
+    root = _scope(value, root)
     entries = value.get("actions", [])
     if not isinstance(entries, list):
         return [], [f"{path}: actions must be a list"]
@@ -214,15 +233,21 @@ def read_actions(path: Path) -> tuple[list[LabelAction], list[str]]:
         action, problems = _read_action(entry, f"{path}: actions[{index}]")
         errors.extend(problems)
         if action is not None:
-            actions.append(action)
+            actions.append(replace(action, root=root, source=str(path)))
     return actions, errors
 
 
-def read_labels(path: Path) -> tuple[list[Label], list[str]]:
-    """Labels of one file, and problems with its entries."""
+def read_labels(path: Path, root: str = "") -> tuple[list[Label], list[str]]:
+    """Labels of one file, and problems with its entries.
+
+    A file may name the paper root it describes (`"root"`); its labels then
+    apply only to papers below that root, so that two pools with the same
+    collection names do not share labels.
+    """
     value, errors = _load_file(path)
     if value is None:
         return [], errors
+    root = _scope(value, root)
     entries = value.get("labels")
     if not isinstance(entries, list):
         return [], [f"{path}: labels must be a list"]
@@ -248,6 +273,7 @@ def read_labels(path: Path) -> tuple[list[Label], list[str]]:
             hidden is True,
             title if isinstance(title, str) else "",
             entry.get("skip") is True,
+            root,
         ))
     return labels, errors
 
@@ -261,8 +287,11 @@ def skip_reason(labels: Iterable[Label], paper_directory: Path, problem_id: str)
     """Why a skip label keeps the pipeline away from a problem, if one does."""
     paper = paper_directory.as_posix()
     candidates = {paper, VERSION_RE.sub("", paper)}
+    resolved = paper_directory.expanduser().resolve()
     for label in labels:
         if not label.skip:
+            continue
+        if label.root and Path(label.root) not in resolved.parents:
             continue
         head, _, tail = label.target.rpartition("/")
         paper_target, op = (head, tail) if PROBLEM_ID_RE.match(tail) else (label.target, "")
@@ -279,8 +308,12 @@ def skip_reason(labels: Iterable[Label], paper_directory: Path, problem_id: str)
 class LabelSource:
     """Labels from files that may change while the workbench runs."""
 
-    def __init__(self, paths: Sequence[Path]):
+    def __init__(self, paths: Sequence[Path], scopes: dict[Path, str] | None = None):
         self.paths = [path.expanduser().resolve() for path in paths]
+        # Paper root a file describes when the file does not say so itself.
+        self.scopes = {
+            path.expanduser().resolve(): root for path, root in (scopes or {}).items()
+        }
         self.lock = threading.Lock()
         self.labels: list[Label] = []
         self.actions: list[LabelAction] = []
@@ -308,11 +341,12 @@ class LabelSource:
             actions: list[LabelAction] = []
             errors: list[str] = []
             for path in self.paths:
-                found, problems = read_labels(path)
+                root = self.scopes.get(path, "")
+                found, problems = read_labels(path, root)
                 labels.extend(found)
                 errors.extend(problems)
                 if not problems:
-                    declared, problems = read_actions(path)
+                    declared, problems = read_actions(path, root)
                     actions.extend(declared)
                     errors.extend(problems)
             self.labels, self.actions = labels, actions
@@ -327,11 +361,13 @@ class LabelSource:
         with self.lock:
             return list(self.actions)
 
-    def find_action(self, key: str, kind: str, target: str) -> LabelAction | None:
+    def find_action(
+        self, key: str, kind: str, target: str, root: str = ""
+    ) -> LabelAction | None:
         return next(
             (
                 action for action in self.current_actions()
-                if action.key == key and action.applies_to(kind, target)
+                if action.key == key and action.applies_to(kind, target, root)
             ),
             None,
         )
@@ -388,6 +424,15 @@ def paper_identity(paper_path: str, roots: Iterable[Path]) -> tuple[str, str]:
     return path.name, ""
 
 
+def paper_root(paper_path: str, roots: Iterable[Path]) -> str:
+    """The paper root a paper lies in, as the string labels are scoped by."""
+    path = Path(paper_path)
+    for root in roots:
+        if path == root or root in path.parents:
+            return str(root)
+    return ""
+
+
 def _index(labels: Iterable[Label]) -> dict[str, list[Label]]:
     index: dict[str, list[Label]] = {}
     for label in labels:
@@ -395,7 +440,9 @@ def _index(labels: Iterable[Label]) -> dict[str, list[Label]]:
     return index
 
 
-def _labels_for(index: dict[str, list[Label]], paper_id: str, problem_id: str = "") -> list[dict]:
+def _labels_for(
+    index: dict[str, list[Label]], paper_id: str, problem_id: str = "", root: str = ""
+) -> list[dict]:
     papers = dict.fromkeys([paper_id, VERSION_RE.sub("", paper_id)])
     targets = list(papers)
     if problem_id:
@@ -403,12 +450,17 @@ def _labels_for(index: dict[str, list[Label]], paper_id: str, problem_id: str = 
     found: dict[tuple[str, bool], dict] = {}
     for target in targets:
         for label in index.get(target, []):
-            found.setdefault((label.label, label.hidden), label.record())
+            if label.covers(root):
+                found.setdefault((label.label, label.hidden), label.record())
     return list(found.values())
 
 
-def _actions_for(actions: Sequence[LabelAction], kind: str, target: str) -> list[dict]:
-    return [action.describe() for action in actions if action.applies_to(kind, target)]
+def _actions_for(
+    actions: Sequence[LabelAction], kind: str, target: str, root: str = ""
+) -> list[dict]:
+    return [
+        action.describe() for action in actions if action.applies_to(kind, target, root)
+    ]
 
 
 def organize(
@@ -417,23 +469,43 @@ def organize(
     labels: Iterable[Label],
     stars: dict[str, set[str]],
     actions: Sequence[LabelAction] = (),
+    projects: dict[str, dict] | None = None,
 ) -> dict:
-    """Add collection, labels, hidden, starred and label actions to catalog rows."""
+    """Add collection, labels, hidden, starred, label actions and project to rows.
+
+    `projects` maps a paper or manuscript root (as a string) to the project
+    record ({"name", "id"}) it belongs to; rows outside them get no project.
+    """
     index = _index(labels)
+    projects = projects or {}
+
+    def project_of(path: str) -> dict | None:
+        candidate = Path(path)
+        best = None
+        for root, project in projects.items():
+            root_path = Path(root)
+            inside = candidate == root_path or root_path in candidate.parents
+            if inside and (best is None or len(root_path.parts) > best[0]):
+                best = (len(root_path.parts), project)
+        return best[1] if best else None
+
     for paper in value.get("papers", []):
+        root = paper_root(paper.get("path", ""), roots)
         paper_id, collection = paper_identity(paper.get("path", ""), roots)
-        found = _labels_for(index, paper_id)
+        found = _labels_for(index, paper_id, root=root)
         paper.update({
             "paperId": paper_id,
             "collection": collection,
             "labels": found,
             "hidden": any(label["hidden"] for label in found),
             "starred": paper.get("key") in stars["papers"],
-            "labelActions": _actions_for(actions, "paper", paper_id),
+            "labelActions": _actions_for(actions, "paper", paper_id, root),
+            "project": project_of(paper.get("path", "")),
         })
     for item in value.get("reviews", []):
+        root = paper_root(item.get("paperDirectory", ""), roots)
         paper_id, collection = paper_identity(item.get("paperDirectory", ""), roots)
-        found = _labels_for(index, paper_id, item.get("problemId", ""))
+        found = _labels_for(index, paper_id, item.get("problemId", ""), root)
         target = f"{paper_id}/{item.get('problemId', '')}"
         item.update({
             "paperId": paper_id,
@@ -441,8 +513,11 @@ def organize(
             "labels": found,
             "hidden": any(label["hidden"] for label in found),
             "starred": item.get("problemKey") in stars["problems"],
-            "labelActions": _actions_for(actions, "problem", target),
+            "labelActions": _actions_for(actions, "problem", target, root),
+            "project": project_of(item.get("paperDirectory", "")),
         })
+    for manuscript in value.get("manuscripts", []):
+        manuscript["project"] = project_of(manuscript.get("path", ""))
     return value
 
 

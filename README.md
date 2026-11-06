@@ -1301,6 +1301,60 @@ Markdown/LaTeX statement. Manually entered problems default to `additional`,
 distinguishing them from problems explicitly stated in or inferred from the
 paper, and are included in the normal triage, literature, and solving flows.
 
+### Several projects in one workbench
+
+`--projects FILE` serves several projects at once: pools or other paper roots,
+each with its own manuscripts, labels and label command, and ordinary paper
+repositories. The file is personal (your checkouts on this machine; TOML or
+JSON) and is never shared; relative paths are relative to it:
+
+```toml
+schema_version = 1
+
+[[project]]
+name = "pool"
+kind = "pool"                       # pool | papers | paper
+papers = "~/problem-commons/pool/papers"
+manuscripts = "~/problem-commons/pool/manuscripts"
+labels = ["~/problem-commons/pool/workbench-labels.json"]
+label_command = ["python3", "/home/me/problem-commons/pool/tools/pool.py", "label-action"]
+
+[[project]]
+name = "spanners"
+kind = "paper"
+path = "~/papers/1d-oriented-spanners"
+```
+
+A project's labels apply only below its own paper root (a labels file may also
+say so itself with `"root"`), so two pools may both have `own/arXiv-…/OP-001`;
+its label actions run its own command. A manuscript is written into the
+manuscripts of the project its results come from; results from two projects
+cannot be combined in one manuscript yet. Every paper, problem and manuscript
+shows its project, and a Project filter appears when there is more than one.
+A missing checkout is reported and skipped. Positional paper directories,
+`--manuscripts`, `--labels` and `--label-command` work as before and can be
+combined with `--projects`.
+
+A paper repository may describe itself for everyone who uses it in
+`loose-ends.toml` at its root (shared, so without machine-specific paths):
+
+```toml
+schema_version = 1
+id = "oriented-spanners"
+title = "Oriented spanners"
+writing_profile = "writing/cg"      # optional, repository-relative
+audience = "computational geometers"
+
+[[manuscript]]
+name = "socg"
+entry = "socg/main.tex"
+build = ["latexmk", "-pdf", "main.tex"]   # optional; run next to the entry
+pdf = "socg/main.pdf"                     # optional; default: the entry as .pdf
+```
+
+Without it, LaTeX files with `\documentclass` up to two levels deep are taken
+as entry points.
+
 ### Collections, labels and stars
 
 Large catalogs can be narrowed in the Problem and Paper filters:

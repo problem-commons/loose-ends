@@ -12,7 +12,7 @@ import shlex
 import subprocess
 import sys
 import uuid
-from typing import Iterable
+from typing import Callable, Iterable
 
 import analyze_papers
 import codex_cli
@@ -560,7 +560,13 @@ def build_plan(
     manuscripts: Path,
     catalog_version: int,
     paper_roots: Iterable[Path] | None = None,
+    manuscripts_for: Callable[[Path], Path | None] | None = None,
 ) -> dict:
+    """Plan a task; `manuscripts_for` maps a target to its project's manuscripts.
+
+    A manuscript task writes into exactly one project: its targets must all
+    belong to the same project (or to none, which uses `manuscripts`).
+    """
     if not isinstance(request, dict):
         raise PlanError("invalid task request")
     action = request.get("action")
@@ -836,6 +842,17 @@ def build_plan(
 
     elif action == "write":
         _require(targets, {"paper", "problem", "attempt"}, action)
+        if manuscripts_for is not None:
+            destinations = {
+                (manuscripts_for(Path(target["path"])) or manuscripts).resolve()
+                for target in targets
+            }
+            if len(destinations) > 1:
+                raise PlanError(
+                    "a manuscript is written into one project; choose results "
+                    "from one project, or write one manuscript per project"
+                )
+            manuscripts = destinations.pop()
         argv = [
             python,
             "-u",

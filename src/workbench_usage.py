@@ -124,7 +124,11 @@ class UsageIndex:
     def __init__(self, store, roots, manuscripts, hub=None):
         self.store = store
         self.roots = [Path(root).resolve() for root in roots]
-        self.manuscripts = Path(manuscripts).resolve()
+        # One manuscript root per project; a single path still works.
+        if isinstance(manuscripts, (str, Path)):
+            manuscripts = [manuscripts]
+        self.manuscript_roots = [Path(root).resolve() for root in manuscripts]
+        self.manuscripts = self.manuscript_roots[0]
         self.hub = hub
         self.stopping = threading.Event()
         self.pending = threading.Event()
@@ -224,7 +228,7 @@ class UsageIndex:
                     scopes.add(("draft", path_key(directory)))
                     scopes.add(("manuscript", path_key(directory.parent)))
                     break
-            if directory.parent == self.manuscripts:
+            if directory.parent in self.manuscript_roots:
                 scopes.add(("manuscript", path_key(directory)))
             if any(directory == root or root in directory.parents for root in self.roots):
                 if (directory / "paper.pdf").is_file() or (directory / "source").is_dir():
@@ -363,7 +367,7 @@ class UsageIndex:
                 if not events.is_file():
                     events = resolve_manifest_path(sources["events"])
                     if not any(events.is_relative_to(root) or events.is_relative_to(path)
-                               for path in [*self.roots, self.manuscripts]):
+                               for path in [*self.roots, *self.manuscript_roots]):
                         continue
                 context = self._managed_context(sources, run)
                 if context["elapsed_seconds"] is not None:
@@ -376,7 +380,7 @@ class UsageIndex:
                         continue
                 changed += self.import_source(events, context, known)
         # Installed logs also cover CLI runs predating managed transcript archives.
-        for root in dict.fromkeys([*self.roots, self.manuscripts]):
+        for root in dict.fromkeys([*self.roots, *self.manuscript_roots]):
             for directory, children, files in os.walk(root):
                 if self.stopping.is_set():
                     return changed

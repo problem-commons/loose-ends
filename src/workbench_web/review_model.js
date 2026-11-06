@@ -188,14 +188,20 @@
   // papers alike. Items with a hidden label stay out of view until the viewer
   // shows hidden items or selects that label.
   function createDefaultOrganizeFilters() {
-    return { collection: "all", label: "all", starred: false, hidden: false };
+    return { project: "all", collection: "all", label: "all", starred: false, hidden: false };
   }
 
   function labelNames(item) {
     return (Array.isArray(item.labels) ? item.labels : []).map(label => label.label);
   }
 
+  function projectName(item) {
+    return item.project?.name || "";
+  }
+
   function matchesOrganize(item, filters) {
+    const project = filters.project || "all";
+    if (project !== "all" && projectName(item) !== project) return false;
     const collection = filters.collection || "all";
     if (collection !== "all" && (item.collection || "") !== collection) return false;
     const label = filters.label || "all";
@@ -218,6 +224,12 @@
     const seen = new Map();
     items.forEach(item => seen.set(item.problemKey || item.key || item.path, item));
     return [...seen.values()];
+  }
+
+  function projectOptions(items) {
+    const rows = uniqueRows(items).filter(projectName);
+    return [["all", "All projects"], ...countBy(rows.map(projectName))
+      .map(([name, count]) => [name, `${name} (${count})`])];
   }
 
   function collectionOptions(items) {
@@ -251,8 +263,10 @@
   }
 
   function organizeFromSearchParams(filters, parameters) {
+    const project = parameters.get("project");
     const collection = parameters.get("collection");
     const label = parameters.get("label");
+    if (project) filters.project = project;
     if (collection) filters.collection = collection;
     if (label) filters.label = label;
     filters.starred = parameters.get("starred") === "1";
@@ -261,7 +275,8 @@
   }
 
   function organizeToSearchParams(parameters, filters) {
-    ["collection", "label", "starred", "hidden"].forEach(name => parameters.delete(name));
+    ["project", "collection", "label", "starred", "hidden"].forEach(name => parameters.delete(name));
+    if (filters.project && filters.project !== "all") parameters.set("project", filters.project);
     if (filters.collection && filters.collection !== "all") parameters.set("collection", filters.collection);
     if (filters.label && filters.label !== "all") parameters.set("label", filters.label);
     if (filters.starred) parameters.set("starred", "1");
@@ -311,7 +326,7 @@
       if (!needle) return true;
       return [
         item.paperTitle, item.paperDirectory, item.paperAuthors,
-        item.collection, ...labelNames(item),
+        item.collection, item.project?.name, ...labelNames(item),
         item.problemId, item.problemTitle, item.problemStatement,
         item.attemptName, item.criticSummary, item.solverSummary,
         item.attemptStatus, item.triageClassification, item.triageSummary,
@@ -345,7 +360,7 @@
       if (!needle) return true;
       return [
         paper.title, paper.name, ...(paper.authors || []), paper.path,
-        paper.collection, ...labelNames(paper),
+        paper.collection, paper.project?.name, ...labelNames(paper),
         paper.arxivId, paper.doi, paper.url, paper.analysisStatus,
       ].join(" ").toLowerCase().includes(needle);
     });
@@ -1024,6 +1039,7 @@
     attemptTags,
     organizeTags,
     collectionOptions,
+    projectOptions,
     labelOptions,
     hiddenCount,
     createDefaultOrganizeFilters,

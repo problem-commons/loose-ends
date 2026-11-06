@@ -209,6 +209,7 @@ button { color: inherit; }
 .attempt-tag.starred { background: var(--amber-soft); color: var(--amber); }
 .label-badges { margin-top: 6px; }
 .badge.collection { background: var(--low-bg); color: var(--low); }
+.badge.project { background: var(--amber-soft); color: var(--amber); text-transform: none; letter-spacing: 0; }
 .label-badges .badge { text-transform: none; letter-spacing: 0; }
 .star-button { white-space: nowrap; }
 .hero-actions { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
