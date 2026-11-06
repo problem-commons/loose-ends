@@ -3511,6 +3511,10 @@ function renderManuscripts() {
   const badges = node("div", "badges");
   badges.append(badge(draft.status || "draft", "neutral"));
   badges.append(badge(draft.verdict, draft.verdict === "ready_for_expert_review" ? "succeeded" : "warn"));
+  if (draft.expositionVerdict) {
+    badges.append(badge(`reader: ${humanize(draft.expositionVerdict)}`, draft.expositionVerdict === "clear" ? "succeeded" : draft.expositionVerdict === "needs_major_revision" ? "warn" : "neutral"));
+  }
+  if (draft.writingProfile) badges.append(badge(`profile: ${draft.writingProfile.name}`, "neutral"));
   const staleSourceCount = Number(draft.sources?.freshness?.stale) || 0;
   if (staleSourceCount) {
     badges.append(badge(
@@ -5251,11 +5255,13 @@ function renderTaskConfiguration(errorMessage = "") {
     if (!task.editJob && !separateWriteTasks(task)) {
       grid.append(field("name", "Manuscript directory name", { value: options.name || "", help: "Leave blank for the derived name." }));
     }
+    grid.append(writingSettings(task, options, null));
   }
   if (task.action === "revise") {
     grid.append(field("authors", "Override authors", { type: "textarea", value: Array.isArray(options.authors) ? options.authors.join("\n") : options.authors || "", help: "Leave blank to inherit." }));
     grid.append(field("title", "Override title direction", { value: options.title || "" }));
     if (!task.editJob) grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
+    grid.append(writingSettings(task, options, draftRecord(task.targets[0]?.path)));
   }
   if (!task.editJob) grid.append(field("priorityLevel", "Scheduling weight", {
     type: "select",
@@ -5322,6 +5328,79 @@ function renderTaskConfiguration(errorMessage = "") {
   dialogBody.scrollTop = scrollTop;
 }
 
+function draftRecord(path) {
+  for (const manuscript of state.catalog.manuscripts || []) {
+    const draft = (manuscript.drafts || []).find(value => value.path === path);
+    if (draft) return draft;
+  }
+  return null;
+}
+
+function writingSettings(task, options, inherited) {
+  // Writing profile, audience, and the manuscript-only reader (write_paper.py).
+  const section = node("section", "model-settings writing-settings");
+  section.append(node("h3", "", "Writing profile and exposition review"));
+  const grid = node("div", "form-grid");
+  const profile = inherited?.writingProfile;
+  const inheritedProfile = profile ? `${profile.name} (${profile.digest})` : "none";
+  grid.append(field("writingProfile", inherited ? "New writing profile" : "Writing profile", {
+    value: options.writingProfile || "", full: true,
+    placeholder: "~/writing/computational-geometry-writing",
+    help: inherited
+      ? `Inherited: ${inheritedProfile}. Leave blank to keep it; a path stores and uses a new version.`
+      : "Optional: a file or directory of writing criteria, e.g. a skill folder. Its text files are copied into the manuscript and given to the writer, the critic, and the reader.",
+  }));
+  grid.append(field("writingProfileExclude", "Leave out of the profile", {
+    type: "textarea", value: Array.isArray(options.writingProfileExclude) ? options.writingProfileExclude.join("\n") : options.writingProfileExclude || "",
+    placeholder: "references/evaluation.md", full: true,
+    help: inherited
+      ? "With a new profile only: glob patterns relative to it, one per line, for background files that are not writing instructions."
+      : "Glob patterns relative to the profile, one per line, for background files that are not writing instructions.",
+  }));
+  if (inherited && profile) {
+    grid.append(checkbox("noWritingProfile", "Revise without the inherited profile", "", options.noWritingProfile === true));
+  }
+  grid.append(field("audience", inherited ? "Override audience" : "Audience", {
+    value: options.audience || "", full: true,
+    help: inherited
+      ? `Inherited: ${inherited.audience || "none"}.`
+      : "Intended readers, for the writer and the reader; with a profile or reader the default is researchers in the field who have not read the cited papers.",
+  }));
+  if (inherited) {
+    grid.append(field("expositionReview", "Exposition reader", {
+      type: "select", value: options.expositionReview || "",
+      options: [
+        ["", `Inherit (${inherited.expositionReview ? "on" : "off"})`],
+        ["on", "On"],
+        ["off", "Off"],
+      ],
+      help: "A reader who sees only the manuscript, its figures and bibliography, the audience, and the profile. Revisions answer its findings; blocking or major ones keep a draft in revision within the round limit.",
+    }));
+  } else {
+    grid.append(checkbox(
+      "expositionReview",
+      "Exposition reader",
+      "A reader who sees only the manuscript, its figures and bibliography, the audience, and the profile. Revisions answer its findings; blocking or major ones keep a draft in revision within the round limit.",
+      options.expositionReview === true || options.expositionReview === "on",
+    ));
+  }
+  grid.append(field("expositionAgent", "Reader agent", {
+    type: "select", value: options.expositionAgent || "",
+    options: [["", "Inherit the critic's"], ["codex", "Codex"], ["claude", "Claude Code (needs Linux/WSL2)"]],
+  }));
+  grid.append(modelField("expositionModel", "Reader model", options.expositionModel, "Inherit the critic's model"));
+  grid.append(field("expositionReasoningEffort", "Reader reasoning", {
+    type: "select", value: options.expositionReasoningEffort || "",
+    options: [["", "Inherit"], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
+  }));
+  grid.append(field("expositionWebSearch", "Reader web search", {
+    type: "select", value: options.expositionWebSearch || "",
+    options: [["", "Default (Disabled)"], ["disabled", "Disabled"], ["indexed", "Indexed"], ["live", "Live"]],
+  }));
+  section.append(grid);
+  return section;
+}
+
 function collectDialogOptions() {
   const options = {};
   dialogBody.querySelectorAll("[name]").forEach(input => {
@@ -5329,6 +5408,10 @@ function collectDialogOptions() {
       if (input.checked) options[input.name] = input.value;
     } else if (input.type === "checkbox") options[input.name] = input.checked;
     else if (input.name === "authors") options.authors = input.value.split("\n").map(value => value.trim()).filter(Boolean);
+    else if (input.name === "writingProfileExclude") {
+      const patterns = input.value.split("\n").map(value => value.trim()).filter(Boolean);
+      if (patterns.length) options.writingProfileExclude = patterns;
+    }
     else if (input.value !== "") options[input.name] = input.value;
   });
   return options;

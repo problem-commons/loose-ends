@@ -546,6 +546,17 @@ def _manuscript_sources(
     }
 
 
+def _draft_profile(manifest: dict) -> dict | None:
+    record = manifest.get("writing_profile")
+    if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+        return None
+    return {
+        "name": record["name"],
+        "digest": str(record.get("digest") or "")[:12],
+        "entry": record.get("entry"),
+    }
+
+
 def _manuscript_inventory(
     directory: Path,
     papers: list[dict] | None = None,
@@ -596,6 +607,8 @@ def _manuscript_inventory(
                     draft / "readiness.md",
                     draft / "paper-critique.md",
                     draft / "paper-review.json",
+                    draft / "exposition-review.md",
+                    draft / "exposition-review.json",
                 )
                 if path.is_file()
             ]
@@ -630,6 +643,15 @@ def _manuscript_inventory(
                         problem_lookup=problem_lookup,
                     ),
                     "files": [str(path.resolve()) for path in draft_files],
+                    # Settings a revision inherits (write_paper --revise).
+                    "writingProfile": _draft_profile(manifest),
+                    "audience": manifest.get("audience")
+                    if isinstance(manifest.get("audience"), str) else None,
+                    "expositionReview": isinstance(manifest.get("exposition_review"), dict)
+                    and manifest["exposition_review"].get("enabled") is True,
+                    "expositionVerdict": _read_json(
+                        draft / "exposition-review.json"
+                    ).get("verdict"),
                 }
             )
             draft_current += 1

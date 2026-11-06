@@ -45,6 +45,9 @@ EDITABLE_TASK_OPTIONS = {
     "reviewModel", "reviewReasoningEffort", "reviewWebSearch", "reviewPrompt",
     "maxRounds", "review", "reviewTimeoutMinutes", "includeLiteratureResolved",
     "mode", "timeoutMinutes", "force", "reanalyze", "recoverComplete", "authors", "title",
+    "writingProfile", "writingProfileExclude", "noWritingProfile", "audience",
+    "expositionReview", "expositionAgent", "expositionModel",
+    "expositionReasoningEffort", "expositionWebSearch",
 }
 
 
@@ -443,6 +446,57 @@ def _review_arguments(argv: list[str], options: dict) -> None:
         argv.extend(("--review-web-search", mode))
 
 
+def _writing_arguments(argv: list[str], options: dict, *, revise: bool) -> None:
+    """Writing profile, audience, and the manuscript-only exposition reviewer."""
+    profile = _text(options, "writingProfile")
+    if profile is not None:
+        path = Path(profile).expanduser()
+        if not path.exists():
+            raise PlanError(f"writing profile not found: {path}")
+        argv.extend(("--writing-profile", str(path.resolve())))
+    patterns = options.get("writingProfileExclude") or []
+    if isinstance(patterns, str):
+        patterns = [line.strip() for line in patterns.splitlines() if line.strip()]
+    if not isinstance(patterns, list) or not all(isinstance(item, str) for item in patterns):
+        raise PlanError("profile exclusions must be glob patterns, one per line")
+    if patterns and profile is None:
+        raise PlanError("profile exclusions need a writing profile")
+    for pattern in patterns:
+        argv.extend(("--writing-profile-exclude", pattern.strip()))
+    if options.get("noWritingProfile") is True:
+        if not revise or profile is not None:
+            raise PlanError("drop the inherited profile only in a revision without a new one")
+        argv.append("--no-writing-profile")
+    if value := _text(options, "audience"):
+        argv.extend(("--audience", value))
+    exposition = options.get("expositionReview")
+    if exposition in (True, "on"):
+        argv.append("--exposition-review")
+    elif exposition == "off":
+        if not revise:
+            raise PlanError("a new manuscript has no exposition review to switch off")
+        argv.append("--no-exposition-review")
+    elif exposition not in (None, False, "", "inherit"):
+        raise PlanError("invalid exposition-review setting")
+    agent = options.get("expositionAgent")
+    if agent:
+        if agent not in codex_cli.AGENTS:
+            raise PlanError("invalid exposition-reviewer agent")
+        argv.extend(("--exposition-agent", agent))
+    if value := _text(options, "expositionModel"):
+        argv.extend(("--exposition-model", value))
+    effort = options.get("expositionReasoningEffort")
+    if effort:
+        if effort not in codex_cli.REASONING_EFFORTS:
+            raise PlanError("invalid exposition-reviewer reasoning effort")
+        argv.extend(("--exposition-reasoning-effort", effort))
+    mode = options.get("expositionWebSearch")
+    if mode:
+        if mode not in codex_cli.WEB_SEARCH_MODES:
+            raise PlanError("invalid exposition-reviewer web-search mode")
+        argv.extend(("--exposition-web-search", mode))
+
+
 def _unit(
     *,
     label: str,
@@ -807,6 +861,7 @@ def build_plan(
             argv.extend(("--author", author.strip()))
         _common_arguments(argv, options, web_search=True)
         _review_arguments(argv, options)
+        _writing_arguments(argv, options, revise=False)
         units.append(
             _unit(
                 label=f"Write one manuscript from {len(targets)} selection(s)",
@@ -845,6 +900,7 @@ def build_plan(
             argv.extend(("--author", author.strip()))
         _common_arguments(argv, options, web_search=True)
         _review_arguments(argv, options)
+        _writing_arguments(argv, options, revise=True)
         units.append(
             _unit(
                 label=f"Revise {target['label']}",
