@@ -1411,7 +1411,18 @@ pdf = "socg/main.pdf"                     # optional; default: the entry as .pdf
 ```
 
 Without it, LaTeX files with `\documentclass` up to two levels deep are taken
-as entry points.
+as entry points (`socg/main.tex` is named `socg`).
+
+The Manuscripts page lists these manuscripts under **Paper repositories**,
+read from the checkout each time (a new `loose-ends.toml` needs no restart):
+the entry, whether the PDF is older than its sources, and every review in
+`manuscript-reviews/` with verdict, model, commit, and whether the reviewed
+files changed since. **Review mathematics**, **Review exposition**, **Review
+both** and **Check build** queue [`review_manuscript.py`](#review-an-existing-manuscript)
+as an ordinary task, with the context files, audience, writing profile,
+build and models set in its dialog; **Check build** builds and lists the
+files the reviewers would get, without a model. The workbench never edits the
+manuscript; commit the new review directories yourself.
 
 ### Collections, labels and stars
 

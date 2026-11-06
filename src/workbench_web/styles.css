@@ -593,3 +593,13 @@ button { color: inherit; }
 .codex-activity summary { cursor: pointer; overflow-wrap: anywhere; color: var(--muted); }
 .codex-activity-label { display: inline-block; max-width: calc(100% - 1.5em); vertical-align: bottom; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .codex-activity pre { margin: 4px 0 4px 14px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; font-size: inherit; }
+/* Manuscripts in paper repositories */
+.sidebar-note { display: block; margin: 2px 6px 6px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.fact-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 13px; }
+.fact-list dt { color: var(--muted); font-weight: 600; }
+.fact-list dd { margin: 0; overflow-wrap: anywhere; }
+.panel p.help, .main-inner > p.help { color: var(--muted); font-size: 12px; }
+.repository-reviews { display: grid; gap: 10px; }
+.repository-review .badges { align-items: center; }
+.repository-review small { display: block; margin-top: 6px; color: var(--muted); }
+.repository-review .actions { margin-top: 8px; }

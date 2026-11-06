@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import tomllib
 from typing import Sequence
@@ -44,7 +44,7 @@ PROJECT_KINDS = ("pool", "papers", "paper")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SHARED_PROJECT_FILE = "loose-ends.toml"
 # Directories never searched for LaTeX entry points of an undescribed repository.
-SKIPPED_DIRECTORIES = {".git", "node_modules", "__pycache__", ".loose-ends"}
+SKIPPED_DIRECTORIES = {".git", "node_modules", "__pycache__", ".loose-ends", "manuscript-reviews"}
 MAX_DETECTION_DEPTH = 2
 
 
@@ -161,6 +161,14 @@ def _relative(value: object, where: str) -> str:
     return relative.as_posix()
 
 
+def default_name(entry: str) -> str:
+    """socg/main.tex is "socg"; paper.tex and notes/long.tex keep their names."""
+    path = PurePosixPath(entry)
+    if path.name == "main.tex" and len(path.parts) > 1:
+        return "-".join(path.parent.parts)
+    return "-".join(path.with_suffix("").parts)
+
+
 def detect_manuscripts(repository: Path) -> tuple[Manuscript, ...]:
     """LaTeX entry points (files with \\documentclass) near the repository root."""
     found: list[Manuscript] = []
@@ -184,12 +192,7 @@ def detect_manuscripts(repository: Path) -> tuple[Manuscript, ...]:
             if not re.search(r"^[^%\n]*\\documentclass", head, re.MULTILINE):
                 continue
             relative = (relative_directory / name).as_posix()
-            # socg/main.tex is "socg"; paper.tex and notes/long.tex keep their names.
-            label = (
-                relative_directory.as_posix().replace("/", "-")
-                if name == "main.tex" and relative_directory.parts
-                else relative.removesuffix(".tex").replace("/", "-")
-            )
+            label = default_name(relative)
             while label in names:
                 label += "-1"
             names.add(label)
@@ -227,13 +230,14 @@ def read_paper_project(repository: Path) -> dict:
         where = f"{path} manuscript[{index}]"
         if not isinstance(raw, dict):
             raise ProjectError(f"{where} must be a table")
-        name = raw.get("name") or Path(str(raw.get("entry", ""))).stem
+        entry = _relative(raw.get("entry"), f"{where} entry")
+        name = raw.get("name") or default_name(entry)
         if not isinstance(name, str) or not NAME_RE.match(name) or name in names:
             raise ProjectError(f"{where} needs a unique name of letters, digits, . _ -")
         names.add(name)
         manuscripts.append(Manuscript(
             name,
-            _relative(raw.get("entry"), f"{where} entry"),
+            entry,
             _command(raw.get("build"), f"{where} build"),
             _relative(raw["pdf"], f"{where} pdf") if raw.get("pdf") else "",
         ))

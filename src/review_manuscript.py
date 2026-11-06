@@ -547,9 +547,37 @@ def review_status(repository: Path, entry: Path | None = None) -> list[dict]:
             "changed": changed,
             "missing": missing,
             "findings": len(result.get("findings", []) or []),
+            "build": (manifest.get("build") or {}).get("status"),
+            "report": f"{manifest_path.parent.relative_to(repository).as_posix()}/"
+                      f"{'math-review.md' if manifest.get('kind') == 'math' else 'exposition-review.md'}",
         })
     rows.sort(key=lambda row: str(row.get("generated_at") or ""))
     return rows
+
+
+def manuscript_overview(repository: Path, manuscript: workbench_projects.Manuscript) -> dict:
+    """What the workbench shows of a repository's manuscript: PDF and reviews."""
+    entry = repository / manuscript.entry
+    pdf = repository / manuscript.pdf_path
+    overview = {
+        **manuscript.record(),
+        "entryPath": str(entry),
+        "exists": entry.is_file(),
+        "pdfPath": str(pdf),
+        "pdfState": "missing",
+        "reviews": [],
+    }
+    if not entry.is_file():
+        return overview
+    if pdf.is_file():
+        sources = _named_inputs(entry, repository)
+        newest = max((path.stat().st_mtime for path in sources), default=0.0)
+        # Not proof that the PDF matches, but a PDF older than a source does not.
+        overview["pdfState"] = "current" if pdf.stat().st_mtime >= newest else "older than its sources"
+    overview["reviews"] = [
+        {**row, "report": str(repository / row["report"])} for row in review_status(repository, entry)
+    ]
+    return overview
 
 
 def build_parser() -> argparse.ArgumentParser:

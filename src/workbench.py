@@ -38,6 +38,7 @@ import download_arxiv_author
 import human_review
 import ingest_paper
 import open_problem_common as common
+import review_manuscript
 import review_solutions
 import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
@@ -1686,6 +1687,34 @@ class WorkbenchApplication:
         project = workbench_projects.project_for(getattr(self, "projects", []), path)
         return project.manuscripts if project and project.manuscripts else None
 
+    def paper_projects(self) -> list[dict]:
+        """Paper repositories with their manuscripts, PDFs and reviews, read now.
+
+        The shared description is read again on every call, so a new
+        loose-ends.toml or manuscript shows without a restart.
+        """
+        values = []
+        for project in getattr(self, "projects", []):
+            if project.kind != "paper":
+                continue
+            record = project.record()
+            record["manuscriptsInRepository"] = []
+            if project.available and project.path is not None:
+                try:
+                    shared = workbench_projects.read_paper_project(project.path)
+                except workbench_projects.ProjectError as exc:
+                    record["error"] = str(exc)
+                    shared = {"manuscripts": project.paper_manuscripts}
+                record["described"] = bool(shared.get("described"))
+                for manuscript in shared["manuscripts"]:
+                    try:
+                        overview = review_manuscript.manuscript_overview(project.path, manuscript)
+                    except (OSError, UnicodeError) as exc:
+                        overview = {**manuscript.record(), "error": str(exc), "reviews": []}
+                    record["manuscriptsInRepository"].append(overview)
+            values.append(record)
+        return values
+
     def import_targets(self) -> list[Path]:
         return workbench_organize.import_targets(self.paper_output_roots)
 
@@ -2491,6 +2520,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     download=values.get("download", [""])[0] == "1",
                     filename=values.get("name", [""])[0] or None,
                 )
+            elif path == "/api/paper-projects":
+                self.send_json({"projects": self.app.paper_projects()})
             elif path == "/api/manuscript-zip":
                 values = parse_qs(parsed.query)
                 self._send_manuscript_zip(values.get("path", [""])[0])

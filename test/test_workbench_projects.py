@@ -1,6 +1,7 @@
 """Several projects in one workbench: pools, paper roots, and paper repositories."""
 
 import json
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -130,7 +131,7 @@ pdf = "journal/build/paper.pdf"
         self.assertEqual(shared["id"], "oriented-spanners")
         socg, journal = shared["manuscripts"]
         self.assertEqual((socg.name, socg.build, socg.pdf_path), ("socg", ("latexmk", "-pdf", "main.tex"), "socg/main.pdf"))
-        self.assertEqual((journal.name, journal.pdf_path), ("paper", "journal/build/paper.pdf"))
+        self.assertEqual((journal.name, journal.pdf_path), ("journal-paper", "journal/build/paper.pdf"))
         (self.repository / "loose-ends.toml").write_text(
             'schema_version = 1\n[[manuscript]]\nentry = "../outside.tex"\n', encoding="utf-8"
         )
@@ -230,6 +231,71 @@ pdf = "journal/build/paper.pdf"
         self.assertEqual(argv[argv.index("--output-dir") + 1], str(pool_b / "manuscripts"))
         with self.assertRaisesRegex(PlanError, "one project"):
             plan([paper_a, paper_b])
+
+    def test_paper_repositories_show_their_reviews_and_offer_review_tasks(self):
+        import hashlib
+        import review_manuscript
+
+        app = workbench.WorkbenchApplication(
+            paths=[], manuscripts=None, state_directory=self.root / "state",
+            projects=projects.load_projects(self.projects_file()),
+        )
+        self.addCleanup(app.close)
+        entry = self.repository / "socg" / "main.tex"
+        review = self.repository / "manuscript-reviews" / "2026-11-06-socg-math-codex-abcdef"
+        review.mkdir(parents=True)
+        common.write_json(review / "manifest.json", {
+            "schema_version": 1, "kind": "math", "generated_at": "2026-11-06T10:00:00Z",
+            "manuscript": {"name": "socg", "entry": "socg/main.tex"},
+            "files": [{"path": "socg/main.tex", "sha256": hashlib.sha256(entry.read_bytes()).hexdigest()}],
+            "revision": {"commit": "0123456789abcdef", "uncommitted": []},
+            "build": {"status": "ok"}, "requested_agent": "claude",
+        })
+        common.write_json(review / "review.json", {"verdict": "needs_minor_revision", "findings": [{"id": "M-001"}]})
+        (review / "math-review.md").write_text("# Review\n\nM-001\n", encoding="utf-8")
+
+        spanners, gone = app.paper_projects()
+        self.assertEqual((spanners["name"], gone["status"]), ("spanners", "missing"))
+        [manuscript] = spanners["manuscriptsInRepository"]
+        self.assertEqual((manuscript["name"], manuscript["entryPath"], manuscript["pdfState"]),
+                         ("socg", str(entry), "missing"))
+        [row] = manuscript["reviews"]
+        self.assertEqual((row["verdict"], row["current"], row["build"], row["agent"]),
+                         ("needs_minor_revision", True, "ok", "claude"))
+        self.assertEqual(row["report"], str(review / "math-review.md"))
+        # The PDF is compared with its sources; an edited source makes the review outdated.
+        pdf = entry.parent / "main.pdf"
+        pdf.write_bytes(b"%PDF")
+        now = entry.stat().st_mtime
+        os.utime(pdf, (now + 60, now + 60))
+        self.assertEqual(review_manuscript.manuscript_overview(
+            self.repository, spanners_manuscript := projects.detect_manuscripts(self.repository)[0]
+        )["pdfState"], "current")
+        entry.write_text(entry.read_text(encoding="utf-8") + "% edited\n", encoding="utf-8")
+        os.utime(pdf, (now - 60, now - 60))
+        overview = review_manuscript.manuscript_overview(self.repository, spanners_manuscript)
+        self.assertEqual(overview["pdfState"], "older than its sources")
+        self.assertEqual(overview["reviews"][0]["changed"], ["socg/main.tex"])
+
+        plan = app.create_plan({
+            "action": "manuscript-review",
+            "targets": [{"kind": "latex", "path": str(entry)}],
+            "options": {"reviewKind": "exposition", "audience": "computational geometers",
+                        "expositionAgent": "claude", "buildMode": "none"},
+        })
+        [unit] = plan["units"]
+        self.assertTrue(unit["argv"][2].endswith("review_manuscript.py"))
+        self.assertEqual(unit["argv"][3:6], [str(entry), "--exposition", "--no-build"])
+        self.assertIn("--exposition-agent", unit["argv"])
+        self.assertEqual(plan["title"], "Manuscript review: main.tex")
+        self.assertIn(f"latex:{entry}", unit["resources"])
+        with self.assertRaisesRegex(PlanError, "not a recognized"):
+            app.create_plan({"action": "manuscript-review",
+                             "targets": [{"path": str(self.repository / "socg" / "missing.tex")}]})
+        outside = self.root / "elsewhere.tex"
+        outside.write_text("\\documentclass{article}\n", encoding="utf-8")
+        with self.assertRaisesRegex(PlanError, "outside the configured roots"):
+            app.create_plan({"action": "manuscript-review", "targets": [{"path": str(outside)}]})
 
 
 if __name__ == "__main__":
