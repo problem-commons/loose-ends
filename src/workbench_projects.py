@@ -184,7 +184,12 @@ def detect_manuscripts(repository: Path) -> tuple[Manuscript, ...]:
             if not re.search(r"^[^%\n]*\\documentclass", head, re.MULTILINE):
                 continue
             relative = (relative_directory / name).as_posix()
-            label = relative.removesuffix(".tex").replace("/", "-")
+            # socg/main.tex is "socg"; paper.tex and notes/long.tex keep their names.
+            label = (
+                relative_directory.as_posix().replace("/", "-")
+                if name == "main.tex" and relative_directory.parts
+                else relative.removesuffix(".tex").replace("/", "-")
+            )
             while label in names:
                 label += "-1"
             names.add(label)

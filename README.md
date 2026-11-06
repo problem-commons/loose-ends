@@ -1189,6 +1189,64 @@ them off, and `--writing-profile` with a changed profile stores and uses a new
 version. Separate editor models and checks for Ipe figure sources are not
 part of this yet.
 
+## Review an existing manuscript
+
+`review_manuscript.py` reviews a LaTeX manuscript that was not written by the
+pipeline, in its own repository and layout: a paper you write with coauthors,
+or a draft from the pool after people edited it.
+
+```sh
+python src/review_manuscript.py ~/papers/spanners/socg/main.tex \
+  --audience "computational geometers (SoCG)" \
+  --writing-profile ~/writing/computational-geometry-writing \
+  --context ~/problem-commons/pool/papers/own/arXiv-.../OP-001/attempt-002
+```
+
+Without `--math` or `--exposition`, both reviews run:
+
+- The mathematical reviewer checks every statement and proof, tries to
+  falsify the main results, and may search the web (`--web-search`, default
+  `live`). It also sees the `--context` files (research notes, attempts),
+  which it treats as evidence to check against, not as truth. Its report has
+  findings `M-001`, ... and a verdict `no_issues_found`,
+  `needs_minor_revision`, `needs_major_revision`, or `incorrect`, and lists
+  every statement as verified, gap, incorrect, or not checked.
+- The exposition reviewer is the manuscript-only reader of `write_paper.py`
+  (findings `X-001`, ...): the manuscript, its PDF and figures, the audience
+  and the writing profile, no context and no web search
+  (`--exposition-web-search`). Its model is set with `--exposition-agent`,
+  `--exposition-model`, ... and defaults to the mathematical reviewer's.
+
+The manuscript is first built with `latexmk -recorder` into a temporary
+directory, so the repository gets no build files; `--build "make paper"` runs
+the project's own build next to the entry file instead, and `--no-build` uses
+the existing PDF (`--pdf FILE`, default the entry as `.pdf`). The reviewers get
+copies of exactly the files the build read inside the repository (sources,
+local packages, bibliography, figures) plus the PDF, not the rest of the
+repository. If the build fails or `latexmk` is missing, the existing PDF is
+used and the manifest says so; without a PDF the reviewers read the sources.
+`--dry-run` builds and lists the files without a review.
+
+Each review lands in its own directory
+`manuscript-reviews/<date>-<manuscript>-<math|exposition>-<agent>-<random>/` in
+the repository: the report (`math-review.md` or `exposition-review.md`),
+`review.json`, and `manifest.json` with the reviewed version (every file
+with its SHA-256 hash, the commit, and which reviewed files had uncommitted
+changes), the build, the model, and the writing profile's digest; the profile
+itself is not copied into the repository. Run logs go to `logs/`, which is
+ignored. Commit the review directories to share them; names never collide
+between machines.
+
+```sh
+python src/review_manuscript.py ~/papers/spanners/socg/main.tex --status
+```
+
+lists the manuscript's reviews and whether each is current or which reviewed
+files changed since. Audience, writing profile, build command and PDF default
+to the manuscript's entry in the repository's `loose-ends.toml` (see
+[Several projects in one workbench](#several-projects-in-one-workbench)). A
+review proposes; it changes nothing in the manuscript.
+
 ## Human review
 
 `src/human_review.py` turns the extracted open problems, solver attempts, and

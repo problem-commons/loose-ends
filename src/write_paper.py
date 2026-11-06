@@ -1141,6 +1141,12 @@ def stage_exposition_context(
     reader = {
         "audience": audience,
         "manuscript_path": "manuscript",
+        "entry": "manuscript/main.tex",
+        "pdf": "manuscript/main.pdf",
+        "files": sorted(
+            f"manuscript/{path.relative_to(manuscript).as_posix()}"
+            for path in manuscript.rglob("*") if path.is_file()
+        ),
         "writing_profile": None,
     }
     if writing_profile is not None:
