@@ -1171,7 +1171,9 @@ as one, whichever vendor runs it.
 
 The reader's model is set with `--exposition-agent`, `--exposition-model`, and
 `--exposition-reasoning-effort` (default: the critic's), its task with
-`--exposition-prompt` or `--exposition-prompt-template`.
+`--exposition-prompt` or `--exposition-prompt-template`. The workbench's Write
+and Revise dialogs offer the same settings under **Writing profile and
+exposition review**, and the Revise dialog shows what the draft would inherit.
 
 ```sh
 python src/write_paper.py papers/edemaine/arXiv-.../OP-001/attempt-003 \

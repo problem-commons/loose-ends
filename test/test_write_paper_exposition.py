@@ -640,5 +640,99 @@ class ExpositionTests(unittest.TestCase):
         self.assertEqual(outcome.final_review.draft.directory, manuscript / "draft-002")
 
 
+class WorkbenchWritingSettingsTests(unittest.TestCase):
+    """The write and revise dialogs pass the profile and reader settings on."""
+
+    def setUp(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+
+    def plan(self, action, targets, options):
+        from workbench_tasks import build_plan
+
+        return build_plan(
+            {"action": action, "targets": targets, "options": options},
+            project_root=write_paper.PROJECT_ROOT,
+            allowed_roots=[self.root],
+            manuscripts=self.root / "manuscripts",
+            catalog_version=1,
+        )["units"][0]["argv"]
+
+    def test_write_and_revise_options_become_arguments(self):
+        from workbench_tasks import PlanError
+
+        paper = make_paper(self.root / "papers")
+        profile = make_profile(self.root)
+        argv = self.plan("write", [{"kind": "paper", "path": str(paper)}], {
+            "writingProfile": str(profile),
+            "writingProfileExclude": "references/evaluation.md\nagents/*\n",
+            "audience": "computational geometers",
+            "expositionReview": True,
+            "expositionAgent": "claude",
+            "expositionModel": "opus",
+            "expositionReasoningEffort": "high",
+            "expositionWebSearch": "disabled",
+        })
+        joined = " ".join(argv)
+        for expected in (
+            f"--writing-profile {profile}",
+            "--writing-profile-exclude references/evaluation.md",
+            "--writing-profile-exclude agents/*",
+            "--audience computational geometers",
+            "--exposition-review",
+            "--exposition-agent claude",
+            "--exposition-model opus",
+            "--exposition-reasoning-effort high",
+            "--exposition-web-search disabled",
+        ):
+            self.assertIn(expected, joined)
+        self.assertNotIn("--writing-profile", " ".join(
+            self.plan("write", [{"kind": "paper", "path": str(paper)}], {})
+        ))
+
+        draft = self.root / "manuscripts" / "test" / "draft-001"
+        draft.mkdir(parents=True)
+        common.write_json(draft / "manifest.json", {"schema_version": 1})
+        revise = self.plan("revise", [{"kind": "draft", "path": str(draft)}], {
+            "noWritingProfile": True, "expositionReview": "off",
+        })
+        self.assertIn("--no-writing-profile", revise)
+        self.assertIn("--no-exposition-review", revise)
+        inherit = self.plan("revise", [{"kind": "draft", "path": str(draft)}], {"expositionReview": ""})
+        self.assertNotIn("--exposition-review", inherit)
+        self.assertNotIn("--no-exposition-review", inherit)
+        for options, message in (
+            ({"writingProfile": str(self.root / "absent")}, "not found"),
+            ({"writingProfileExclude": "agents/*"}, "need a writing profile"),
+            ({"expositionReview": "off"}, "no exposition review"),
+            ({"expositionAgent": "gemini"}, "invalid exposition-reviewer agent"),
+        ):
+            with self.assertRaisesRegex(PlanError, message):
+                self.plan("write", [{"kind": "paper", "path": str(paper)}], options)
+
+    def test_catalog_shows_what_a_revision_inherits(self):
+        import workbench
+
+        manuscripts = self.root / "manuscripts"
+        draft = manuscripts / "test" / "draft-001"
+        draft.mkdir(parents=True)
+        common.write_json(draft / "manifest.json", {
+            "schema_version": 1,
+            "writing_profile": {"name": "cg-writing", "digest": "0123456789abcdef", "entry": "SKILL.md"},
+            "audience": "computational geometers",
+            "exposition_review": {"enabled": True},
+        })
+        common.write_json(draft / "paper-result.json", {"title": "T"})
+        common.write_json(draft / "exposition-review.json", {"verdict": "needs_minor_revision"})
+        (draft / "exposition-review.md").write_text("# Review\n", encoding="utf-8")
+        record = workbench._manuscript_inventory(manuscripts)[0]["drafts"][0]
+        self.assertEqual(record["writingProfile"], {"name": "cg-writing", "digest": "0123456789ab", "entry": "SKILL.md"})
+        self.assertEqual(record["audience"], "computational geometers")
+        self.assertTrue(record["expositionReview"])
+        self.assertEqual(record["expositionVerdict"], "needs_minor_revision")
+        self.assertTrue(any(path.endswith("exposition-review.md") for path in record["files"]))
+
+
 if __name__ == "__main__":
     unittest.main()
