@@ -39,6 +39,7 @@ import human_review
 import ingest_paper
 import open_problem_common as common
 import review_manuscript
+import source_references
 import review_solutions
 import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
@@ -1682,6 +1683,11 @@ class WorkbenchApplication:
                     roots[str(root)] = record
         return roots
 
+    def repository_for(self, path: Path) -> Path | None:
+        """The folder of the paper project a manuscript belongs to."""
+        project = workbench_projects.project_for(getattr(self, "projects", []), path)
+        return project.path if project and project.kind == "paper" else None
+
     def manuscripts_for(self, path: Path) -> Path | None:
         """The manuscripts root of the project a target belongs to."""
         project = workbench_projects.project_for(getattr(self, "projects", []), path)
@@ -1706,6 +1712,7 @@ class WorkbenchApplication:
                     record["error"] = str(exc)
                     shared = {"manuscripts": project.paper_manuscripts}
                 record["described"] = bool(shared.get("described"))
+                record["source"] = source_references.reference(project.path)
                 for manuscript in shared["manuscripts"]:
                     try:
                         overview = review_manuscript.manuscript_overview(project.path, manuscript)
@@ -1814,6 +1821,7 @@ class WorkbenchApplication:
             catalog_version=self.catalog.version,
             paper_roots=self.paper_output_roots,
             manuscripts_for=self.manuscripts_for,
+            repository_for=self.repository_for,
         )
         return self._save_plan(request, plan)
 
@@ -1826,6 +1834,7 @@ class WorkbenchApplication:
             catalog_version=self.catalog.version,
             paper_roots=self.paper_output_roots,
             manuscripts_for=self.manuscripts_for,
+            repository_for=self.repository_for,
         )
         return self._save_plan(request, plan)
 

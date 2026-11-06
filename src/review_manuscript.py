@@ -47,6 +47,7 @@ from typing import Sequence
 import artifact_reporting
 import codex_cli
 import open_problem_common as common
+import source_references
 from validation import exposition_review as exposition_validation
 from validation import manuscript_review as math_validation
 import workbench_projects
@@ -102,39 +103,40 @@ def _relative_or_none(path: Path | None, root: Path) -> str | None:
 
 
 def find_repository(entry: Path) -> Path:
-    """The git repository of the manuscript, or its directory."""
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(entry.parent), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return entry.parent
-    if completed.returncode == 0 and completed.stdout.strip():
-        return Path(completed.stdout.strip()).resolve()
-    return entry.parent
+    """The manuscript's project folder: where its reviews go.
+
+    The nearest folder with a loose-ends.toml, else the root of its git
+    checkout, else the entry's folder. A folder of notes inside a larger
+    checkout becomes a project of its own with a loose-ends.toml (or with
+    --repository).
+    """
+    root = source_references.checkout_root(entry)
+    for directory in entry.parents:
+        if (directory / workbench_projects.SHARED_PROJECT_FILE).is_file():
+            return directory
+        if directory == root:
+            break
+    return root or entry.parent
 
 
 def git_state(repository: Path, files: Sequence[Path]) -> dict:
-    """Commit, remote, and the reviewed files with uncommitted changes."""
-    def git(*arguments: str) -> str | None:
-        try:
-            completed = subprocess.run(
-                ["git", "-C", str(repository), *arguments],
-                capture_output=True, text=True, timeout=30, check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        return completed.stdout if completed.returncode == 0 else None
-
-    commit = git("rev-parse", "HEAD")
-    if commit is None:
-        return {"git": False, "commit": None, "uncommitted": [], "remote": None}
-    relative = [path.relative_to(repository).as_posix() for path in files]
-    status = git("status", "--porcelain", "--", *relative) or ""
-    changed = sorted({line[3:].strip() for line in status.splitlines() if line.strip()})
-    remote = (git("config", "--get", "remote.origin.url") or "").strip() or None
-    return {"git": True, "commit": commit.strip(), "uncommitted": changed, "remote": remote}
+    """The commit of the reviewed files, where to find it, and what is not committed."""
+    checkout = source_references.checkout_of(repository)
+    if checkout is None or checkout.commit is None:
+        return {"git": False, "repository": None, "path": None, "commit": None,
+                "pushed": None, "uncommitted": []}
+    changed = source_references.changed_paths(checkout, repository) or set()
+    return {
+        "git": True,
+        "repository": checkout.repository,
+        "path": checkout.relative(repository) or ".",
+        "commit": checkout.commit,
+        "pushed": checkout.pushed,
+        "uncommitted": sorted(
+            path.relative_to(repository).as_posix() for path in files
+            if source_references.is_changed(checkout.relative(path), changed)
+        ),
+    }
 
 
 def settings_for(entry: Path, repository: Path) -> dict:
@@ -358,6 +360,7 @@ def profile_record(profile: write_paper.WritingProfile) -> dict:
     """The profile's identity; the profile itself is not copied into the repository."""
     return {
         **profile.summary(),
+        "origin": profile.origin,
         "excluded": list(profile.excluded),
         "files": [{"path": path, "sha256": digest, "bytes": size} for path, digest, size in profile.files],
     }
@@ -408,17 +411,21 @@ def run_review(
                 else:
                     shutil.copyfile(source, target)
                     members = [source]
-                context_records += [
-                    {
-                        "staged": (target / member.relative_to(source)).relative_to(root).as_posix()
-                        if source.is_dir() else target.relative_to(root).as_posix(),
-                        # Paths outside the repository stay on this machine.
-                        "path": member.relative_to(plan.repository).as_posix()
-                        if _inside(member, plan.repository) else None,
-                        "sha256": hashlib.sha256(member.read_bytes()).hexdigest(),
-                    }
-                    for member in members
-                ]
+                # Repository, path and commit instead of this machine's paths.
+                origin, states = source_references.describe(source, members)
+                context_records.append({
+                    "staged": target.relative_to(root).as_posix(),
+                    "source": origin,
+                    "files": [
+                        {
+                            "staged": (target / member.relative_to(source)).relative_to(root).as_posix()
+                            if source.is_dir() else target.relative_to(root).as_posix(),
+                            **state,
+                            "sha256": hashlib.sha256(member.read_bytes()).hexdigest(),
+                        }
+                        for member, state in zip(members, states)
+                    ],
+                })
             common.write_json(root / "reviewer.json", {
                 "entry": staged_entry, "pdf": staged_pdf, "files": staged,
                 "context": sorted(
@@ -548,6 +555,14 @@ def review_status(repository: Path, entry: Path | None = None) -> list[dict]:
             "missing": missing,
             "findings": len(result.get("findings", []) or []),
             "build": (manifest.get("build") or {}).get("status"),
+            "context": [
+                source_references.label(item.get("source") or {}, item.get("staged", ""))
+                for item in manifest.get("context", []) if isinstance(item, dict)
+            ],
+            "writing_profile": (
+                f"{profile.get('name')} {str(profile.get('digest', ''))[:12]}"
+                if isinstance(profile := manifest.get("writing_profile"), dict) else None
+            ),
             "report": f"{manifest_path.parent.relative_to(repository).as_posix()}/"
                       f"{'math-review.md' if manifest.get('kind') == 'math' else 'exposition-review.md'}",
         })
@@ -591,6 +606,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="review the exposition, as a reader with only the manuscript")
     parser.add_argument("--status", action="store_true",
                         help="list the manuscript's reviews and whether they are current")
+    parser.add_argument("--repository", type=Path, metavar="DIR",
+                        help="the manuscript's project folder, where reviews go (default: the "
+                        "nearest folder with loose-ends.toml, else the git checkout's root)")
     parser.add_argument("--audience", help="intended readers (exposition review)")
     parser.add_argument("--writing-profile", type=Path, metavar="PATH",
                         help="writing criteria for the exposition review")
@@ -629,7 +647,11 @@ def main(argv: list[str] | None = None) -> int:
         entry = args.entry.expanduser().resolve()
         if not entry.is_file() or entry.suffix != ".tex":
             raise common.CodexError(f"not a LaTeX file: {entry}")
-        repository = find_repository(entry)
+        repository = (
+            args.repository.expanduser().resolve() if args.repository else find_repository(entry)
+        )
+        if not _inside(entry, repository):
+            raise common.CodexError(f"{entry} is not inside {repository}")
         if args.status:
             rows = review_status(repository, entry)
             if not rows:
@@ -685,8 +707,21 @@ def main(argv: list[str] | None = None) -> int:
         print("  PDF: " + ("yes" if build.pdf else "none; the reviewers read the sources only"))
         state = git_state(repository, files)
         if state["git"]:
-            print(f"  commit {state['commit'][:12]}"
-                  + (f"; uncommitted: {', '.join(state['uncommitted'])}" if state["uncommitted"] else ""))
+            print(f"  {state['repository'] or 'local checkout'} commit {state['commit'][:12]}"
+                  + (f"; uncommitted: {', '.join(state['uncommitted'])}" if state["uncommitted"] else "")
+                  + ("; not pushed" if state["pushed"] is False else ""))
+        else:
+            print("  not in a git checkout: the reviews identify the manuscript by its file hashes only")
+        for path in context:
+            origin = source_references.reference(path)
+            print(f"  context {path.name}: {source_references.label(origin, 'not in a git checkout')}")
+            for message in source_references.warnings(f"context {path.name}", origin):
+                print(f"    note: {message}")
+        if "exposition" in kinds and profile_source is not None:
+            origin = source_references.reference(profile_source)
+            print(f"  writing profile: {source_references.label(origin, str(profile_source))}")
+            for message in source_references.warnings("the writing profile", origin):
+                print(f"    note: {message}")
         if args.dry_run:
             print(f"Would run: {', '.join(kinds)} review(s) into {reviews}")
             return 0

@@ -1129,7 +1129,11 @@ example a skill folder with `SKILL.md` and `references/`. Its text files
 hidden files) are copied once into the manuscript's
 `writing-profiles/<name>-<digest>/`, staged as `inputs/writing-profile/` for the
 writer and the paper critic, and recorded in every draft's `manifest.json`
-with each file's SHA-256 hash. `--writing-profile-exclude PATTERN` (repeatable,
+with each file's SHA-256 hash. If the profile lives in a git checkout, the
+manifest also records where: repository, path and commit (see below). Keeping
+your profiles in one repository, one folder per profile, gives them a history
+and lets every draft and review name the exact version it used.
+`--writing-profile-exclude PATTERN` (repeatable,
 relative to the profile) leaves out background files that are not writing
 instructions, such as notes on evaluating the profile itself. When the profile
 has a `SKILL.md` (or `README.md`), every agent is told to start there and to
@@ -1228,14 +1232,32 @@ used and the manifest says so; without a PDF the reviewers read the sources.
 `--dry-run` builds and lists the files without a review.
 
 Each review lands in its own directory
-`manuscript-reviews/<date>-<manuscript>-<math|exposition>-<agent>-<random>/` in
-the repository: the report (`math-review.md` or `exposition-review.md`),
-`review.json`, and `manifest.json` with the reviewed version (every file
-with its SHA-256 hash, the commit, and which reviewed files had uncommitted
-changes), the build, the model, and the writing profile's digest; the profile
-itself is not copied into the repository. Run logs go to `logs/`, which is
-ignored. Commit the review directories to share them; names never collide
-between machines.
+`manuscript-reviews/<date>-<manuscript>-<math|exposition>-<agent>-<random>/` of
+the manuscript's project folder: the nearest folder with a `loose-ends.toml`,
+else the root of its git checkout, else the entry's folder (`--repository
+DIR` sets it; the workbench passes the paper project's folder). The directory
+holds the report (`math-review.md` or `exposition-review.md`), `review.json`,
+and `manifest.json` with the reviewed version (every file with its SHA-256
+hash, the commit, and which reviewed files had uncommitted changes), the
+build, the model, the writing profile's digest, and the context files. Run
+logs go to `logs/`, which is ignored. Commit the review directories to share
+them; names never collide between machines.
+
+Inputs from elsewhere are recorded without the paths of this machine, as
+repository, path in it, and commit, with whether the file was committed
+unchanged and whether the commit is pushed:
+
+```json
+{"repository": "github.com/problem-commons/pool",
+ "path": "papers/own/arXiv-2412.06316/OP-001/attempt-002",
+ "commit": "3a1fb45…", "committed": true, "pushed": true}
+```
+
+Anyone with access finds the input again with `git show
+3a1fb45:papers/…`; each file's hash confirms it. The script warns when a
+context file or the profile is not committed, not pushed, or not in a checkout
+with a hosted remote; such inputs are identified by their hashes only. The
+writing profile itself is not copied into the repository.
 
 ```sh
 python src/review_manuscript.py ~/papers/spanners/socg/main.tex --status
@@ -1246,6 +1268,19 @@ files changed since. Audience, writing profile, build command and PDF default
 to the manuscript's entry in the repository's `loose-ends.toml` (see
 [Several projects in one workbench](#several-projects-in-one-workbench)). A
 review proposes; it changes nothing in the manuscript.
+
+To see what Loose Ends makes of your folders before a first run:
+
+```sh
+python src/scan_folders.py ~/papers/oriented-spanners ~/math-notes
+python src/scan_folders.py ~/math-notes --toml > ~/math-notes/loose-ends.toml   # then edit
+```
+
+For each folder it reports the git checkout (repository, commit, uncommitted,
+pushed), the manuscripts found or described, their PDFs and reviews, LaTeX
+documents too deep to be found without a `loose-ends.toml`, and other
+material that can be context for a mathematical review, and ends with the
+`papers = [...]` line for the workbench. It changes nothing.
 
 ## Human review
 

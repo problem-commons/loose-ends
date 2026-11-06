@@ -3809,7 +3809,18 @@ function renderRepositoryManuscript(item) {
     if (!value) return;
     list.append(node("dt", "", label), node("dd", "", value));
   };
-  fact("Repository", project.path);
+  fact("Folder", project.path);
+  const source = project.source || {};
+  if (source.commit) {
+    fact("Repository", [
+      `${source.repository || "local checkout (no hosted remote)"}${source.path && source.path !== "." ? `:${source.path}` : ""}`,
+      `commit ${source.commit.slice(0, 10)}`,
+      source.committed === false ? "uncommitted changes" : "",
+      source.pushed === false ? "not pushed" : "",
+    ].filter(Boolean).join(" · "));
+  } else {
+    fact("Repository", "not a git checkout: reviews identify the manuscript by file hashes only");
+  }
   fact("Entry", manuscript.entry);
   fact("PDF", manuscript.pdf);
   fact("Build", manuscript.build?.length ? manuscript.build.join(" ") : "latexmk into a temporary directory");
@@ -3866,6 +3877,8 @@ function renderRepositoryManuscript(item) {
       review.build ? `build ${review.build}` : "",
     ].filter(Boolean).join(" · ");
     card.append(node("small", "", details));
+    if (review.context?.length) card.append(node("small", "", `Context: ${review.context.join("; ")}`));
+    if (review.writing_profile) card.append(node("small", "", `Writing profile: ${review.writing_profile}`));
     if (!review.current) {
       const changed = [...review.changed, ...review.missing.map(path => `${path} (missing)`)];
       card.append(node("p", "help", `Changed since: ${changed.join(", ")}`));

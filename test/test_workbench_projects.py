@@ -256,6 +256,7 @@ pdf = "journal/build/paper.pdf"
 
         spanners, gone = app.paper_projects()
         self.assertEqual((spanners["name"], gone["status"]), ("spanners", "missing"))
+        self.assertIsNone(spanners["source"]["commit"])  # not a git checkout
         [manuscript] = spanners["manuscriptsInRepository"]
         self.assertEqual((manuscript["name"], manuscript["entryPath"], manuscript["pdfState"]),
                          ("socg", str(entry), "missing"))
@@ -285,7 +286,8 @@ pdf = "journal/build/paper.pdf"
         })
         [unit] = plan["units"]
         self.assertTrue(unit["argv"][2].endswith("review_manuscript.py"))
-        self.assertEqual(unit["argv"][3:6], [str(entry), "--exposition", "--no-build"])
+        self.assertEqual(unit["argv"][3:8], [str(entry), "--repository", str(self.repository),
+                                             "--exposition", "--no-build"])
         self.assertIn("--exposition-agent", unit["argv"])
         self.assertEqual(plan["title"], "Manuscript review: main.tex")
         self.assertIn(f"latex:{entry}", unit["resources"])

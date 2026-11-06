@@ -51,7 +51,7 @@ EDITABLE_TASK_OPTIONS = {
     "writingProfile", "writingProfileExclude", "noWritingProfile", "audience",
     "expositionReview", "expositionAgent", "expositionModel",
     "expositionReasoningEffort", "expositionWebSearch",
-    "expositionPrompt", "contextPaths", "buildMode", "buildCommand",
+    "expositionPrompt", "contextPaths", "buildMode", "buildCommand", "reviewKind",
 }
 
 
@@ -588,6 +588,7 @@ def build_plan(
     catalog_version: int,
     paper_roots: Iterable[Path] | None = None,
     manuscripts_for: Callable[[Path], Path | None] | None = None,
+    repository_for: Callable[[Path], Path | None] | None = None,
 ) -> dict:
     """Plan a task; `manuscripts_for` maps a target to its project's manuscripts.
 
@@ -966,6 +967,9 @@ def build_plan(
         for target in targets:
             entry = Path(target["path"])
             argv = [python, "-u", str(script / "review_manuscript.py"), str(entry)]
+            # A paper project's reviews go to its folder, also without git.
+            if repository_for is not None and (folder := repository_for(entry)) is not None:
+                argv.extend(("--repository", str(folder)))
             if kind == "check":
                 argv.append("--dry-run")
             elif kind != "both":

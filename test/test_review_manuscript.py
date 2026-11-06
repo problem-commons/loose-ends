@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_cli
 import open_problem_common as common
 import review_manuscript as review
+import source_references
 from validation import manuscript_review as math_validation
 from test_write_paper import write_run_files
 from test_write_paper_exposition import PROFILE_FILES, reader_finding, reader_result, write_reader_output
@@ -79,6 +81,20 @@ def make_repository(root: Path) -> Path:
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "paper")
     return repository
+
+
+def make_pool(root: Path) -> Path:
+    """A pool checkout with a hosted remote whose main branch has the commit."""
+    pool = root / "pool"
+    attempt = pool / "papers" / "own" / "arXiv-1" / "OP-001" / "attempt-002"
+    attempt.mkdir(parents=True)
+    (attempt / "solution.md").write_text("# Solution\n\nCase k = 2.\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "-b", "main", str(pool)], check=True)
+    git(pool, "add", ".")
+    git(pool, "commit", "-qm", "attempt")
+    git(pool, "remote", "add", "origin", "https://x-access-token:secret@github.com/problem-commons/pool.git")
+    git(pool, "update-ref", "refs/remotes/origin/main", "HEAD")
+    return pool
 
 
 def math_result(verdict: str = "needs_major_revision", severity: str = "major") -> dict:
@@ -213,16 +229,24 @@ class ReviewManuscriptTests(unittest.TestCase):
         commit = git(self.repository, "rev-parse", "HEAD").strip()
         intro = self.entry.parent / "sections" / "intro.tex"
         intro.write_text(intro.read_text(encoding="utf-8") + "More.\n", encoding="utf-8")
+        pool = make_pool(self.root)
+        attempt = pool / "papers" / "own" / "arXiv-1" / "OP-001" / "attempt-002"
         notes = self.root / "attempt.md"
         notes.write_text("# Attempt\n\nThe k = 2 case.\n", encoding="utf-8")
         seen: dict = {}
-        code, output = self.run_main("--no-build", "--context", str(notes), fake=self.recording_fake(seen))
+        code, output = self.run_main("--no-build", "--context", str(attempt), "--context", str(notes),
+                                     fake=self.recording_fake(seen))
         self.assertEqual(code, 0, output)
+        self.assertIn("context attempt-002: github.com/problem-commons/pool:papers/own/arXiv-1/OP-001/attempt-002@", output)
+        self.assertIn("context attempt.md is not in a git checkout", output)
+        self.assertIn("the writing profile is in a checkout without a hosted remote", output)
 
         paper = {f"manuscript/socg/{name}" for name in (
             "main.tex", "macros.sty", "refs.bib", "sections/intro.tex", "figures/square.png", "main.pdf",
         )}
-        self.assertEqual(seen["math"]["inputs"], paper | {"reviewer.json", "context/01-attempt.md"})
+        self.assertEqual(seen["math"]["inputs"], paper | {
+            "reviewer.json", "context/01-attempt-002/solution.md", "context/02-attempt.md",
+        })
         self.assertEqual(seen["exposition"]["inputs"], paper | {
             "reader.json", *(f"writing-profile/{path}" for path in PROFILE_FILES),
         })
@@ -246,13 +270,34 @@ class ReviewManuscriptTests(unittest.TestCase):
         self.assertEqual(manifest["build"]["status"], "skipped")
         self.assertTrue(manifest["pdf_reviewed"])
         self.assertEqual(manifest["content_digest"], review.content_digest(manifest["files"]))
-        self.assertEqual(manifest["context"][0]["path"], None)  # outside the repository
-        self.assertEqual(manifest["context"][0]["staged"], "context/01-attempt.md")
+        pool_commit = git(pool, "rev-parse", "HEAD").strip()
+        from_pool, loose = manifest["context"]
+        self.assertEqual(from_pool["source"], {
+            "repository": "github.com/problem-commons/pool",
+            "path": "papers/own/arXiv-1/OP-001/attempt-002",
+            "commit": pool_commit, "committed": True, "pushed": True,
+        })
+        [solution] = from_pool["files"]
+        self.assertEqual((solution["staged"], solution["path"], solution["committed"]),
+                         ("context/01-attempt-002/solution.md",
+                          "papers/own/arXiv-1/OP-001/attempt-002/solution.md", True))
+        # No path of this machine: a file outside any checkout has its hash only.
+        self.assertEqual(loose["source"]["path"], None)
+        self.assertEqual(loose["files"][0]["path"], None)
+        self.assertNotIn(str(self.root), json.dumps(manifest))
+        self.assertEqual(manifest["revision"]["path"], ".")
         self.assertIsNone(manifest["writing_profile"])
         exposition = common.read_json(directories[0] / "manifest.json")
         self.assertEqual(exposition["context"], [])
         self.assertEqual(exposition["audience"], "computational geometers")
         self.assertEqual(sorted(item["path"] for item in exposition["writing_profile"]["files"]), sorted(PROFILE_FILES))
+        self.assertEqual(exposition["writing_profile"]["origin"]["path"], "writing/cg")
+        self.assertEqual(exposition["writing_profile"]["origin"]["commit"], commit)
+        self.assertNotIn(str(self.root), json.dumps(exposition))
+        rows = {row["kind"]: row for row in review.review_status(self.repository, self.entry)}
+        self.assertTrue(rows["math"]["context"][0].startswith("github.com/problem-commons/pool:papers/"))
+        self.assertEqual(rows["exposition"]["context"], [])
+        self.assertTrue(rows["exposition"]["writing_profile"].startswith("cg "))
         self.assertTrue((math / "math-review.md").is_file())
         self.assertEqual(common.read_json(math / "review.json")["verdict"], "needs_major_revision")
         # Only the reviews are new; their run logs are ignored, no profile copy.
@@ -331,6 +376,83 @@ class ReviewManuscriptTests(unittest.TestCase):
         code, output = self.run_main("--context", str(self.root / "missing.md"))
         self.assertEqual(code, 1)
         self.assertIn("context not found", output)
+
+    # -- references and project folders ------------------------------------------
+
+    def test_references_name_repository_path_and_commit(self):
+        for url, expected in [
+            ("https://github.com/problem-commons/pool.git", "github.com/problem-commons/pool"),
+            ("https://x-access-token:secret@github.com/o/r", "github.com/o/r"),
+            ("git@github.com:o/r.git", "github.com/o/r"),
+            ("ssh://git@GitHub.com:22/o/r.git/", "github.com/o/r"),
+            ("/home/me/r", None), ("../r", None), ("file:///home/me/r", None), ("", None),
+        ]:
+            self.assertEqual(source_references.normalize_remote(url), expected, url)
+        pool = make_pool(self.root)
+        attempt = pool / "papers" / "own" / "arXiv-1" / "OP-001" / "attempt-002"
+        self.assertEqual(source_references.reference(attempt)["committed"], True)
+        self.assertEqual(source_references.warnings("x", source_references.reference(attempt)), [])
+        (attempt / "draft.md").write_text("new\n", encoding="utf-8")
+        (pool / ".gitignore").write_text("papers/**/inputs/\n", encoding="utf-8")
+        (attempt / "inputs").mkdir()
+        (attempt / "inputs" / "paper.tex").write_text("x\n", encoding="utf-8")
+        origin, states = source_references.describe(
+            attempt, [attempt / "solution.md", attempt / "draft.md", attempt / "inputs" / "paper.tex"]
+        )
+        self.assertFalse(origin["committed"])
+        self.assertEqual([state["committed"] for state in states], [True, False, False])
+        self.assertIn("uncommitted", " ".join(source_references.warnings("x", origin)))
+        git(pool, "add", "papers")
+        git(pool, "commit", "-qm", "more")
+        later = source_references.reference(attempt / "draft.md")
+        self.assertEqual((later["committed"], later["pushed"]), (True, False))
+        self.assertIn("not pushed", " ".join(source_references.warnings("x", later)))
+
+    def test_project_folders_inside_and_outside_checkouts(self):
+        # A notes folder with its own loose-ends.toml inside a larger checkout.
+        notes = self.repository / "lemmas"
+        notes.mkdir()
+        (notes / "loose-ends.toml").write_text("schema_version = 1\n", encoding="utf-8")
+        (notes / "lemma.tex").write_text("\\documentclass{article}\n\\begin{document}x\\end{document}\n",
+                                         encoding="utf-8")
+        self.assertEqual(review.find_repository(notes / "lemma.tex"), notes)
+        self.assertEqual(review.find_repository(self.entry), self.repository)
+        state = review.git_state(notes, [notes / "lemma.tex"])
+        self.assertEqual((state["path"], state["uncommitted"]), ("lemmas", ["lemma.tex"]))
+        # A folder that is no git checkout.
+        loose = self.root / "math-notes"
+        loose.mkdir()
+        (loose / "a.tex").write_text("x\n", encoding="utf-8")
+        self.assertEqual(review.find_repository(loose / "a.tex"), loose)
+        self.assertFalse(review.git_state(loose, [loose / "a.tex"])["git"])
+        code, output = self.run_main("--repository", str(notes), "--status")
+        self.assertEqual(code, 1)
+        self.assertIn("is not inside", output)
+
+    def test_scanning_folders(self):
+        import scan_folders
+
+        notes = self.root / "math-notes"
+        (notes / "2024" / "spanners" / "drafts").mkdir(parents=True)
+        (notes / "2024" / "spanners" / "drafts" / "lemma.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}x\\end{document}\n", encoding="utf-8")
+        (notes / "ideas.md").write_text("# Ideas\n", encoding="utf-8")
+        out = StringIO()
+        with redirect_stdout(out):
+            code = scan_folders.main([str(self.repository), str(notes)])
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("manuscript socg: socg/main.tex, no PDF, 0 review(s)", text)
+        self.assertIn("1 more LaTeX document(s) not listed: 2024/spanners/drafts/lemma.tex", text)
+        self.assertIn("its notes can also be --context", text)
+        self.assertIn(f'papers = ["{self.repository}"]', text)
+        out = StringIO()
+        with redirect_stdout(out):
+            scan_folders.main([str(notes), "--toml"])
+        description = out.getvalue()
+        (notes / "loose-ends.toml").write_text(description, encoding="utf-8")
+        [manuscript] = review.workbench_projects.read_paper_project(notes)["manuscripts"]
+        self.assertEqual(manuscript.entry, "2024/spanners/drafts/lemma.tex")
 
 
 if __name__ == "__main__":
