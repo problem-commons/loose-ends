@@ -1712,10 +1712,13 @@ class WorkbenchApplication:
                     record["error"] = str(exc)
                     shared = {"manuscripts": project.paper_manuscripts}
                 record["described"] = bool(shared.get("described"))
+                record["reviews"] = shared.get("reviews") or workbench_projects.DEFAULT_REVIEWS
                 record["source"] = source_references.reference(project.path)
                 for manuscript in shared["manuscripts"]:
                     try:
-                        overview = review_manuscript.manuscript_overview(project.path, manuscript)
+                        overview = review_manuscript.manuscript_overview(
+                            project.path, manuscript, shared.get("reviews") or workbench_projects.DEFAULT_REVIEWS
+                        )
                     except (OSError, UnicodeError) as exc:
                         overview = {**manuscript.record(), "error": str(exc), "reviews": []}
                     record["manuscriptsInRepository"].append(overview)

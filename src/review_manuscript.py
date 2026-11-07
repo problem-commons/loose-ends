@@ -57,7 +57,7 @@ import write_paper
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATH_PROMPT = PROJECT_ROOT / "prompts" / "review-manuscript-mathematics.md"
 DEFAULT_MATH_SCHEMA = PROJECT_ROOT / "schemas" / "manuscript-math-review.schema.json"
-REVIEWS_DIRECTORY = "manuscript-reviews"
+REVIEWS_DIRECTORY = workbench_projects.DEFAULT_REVIEWS
 MANIFEST_SCHEMA_VERSION = 1
 KINDS = ("math", "exposition")
 BUILD_TIMEOUT_SECONDS = 600
@@ -68,6 +68,10 @@ MANUSCRIPT_SUFFIXES = {
     ".dat", ".csv", ".txt",
 }
 GRAPHICS_SUFFIXES = (".pdf", ".png", ".jpg", ".jpeg", ".eps")
+# Copied for the default build, so that it runs as in the project.
+BUILD_SUFFIXES = MANUSCRIPT_SUFFIXES | {".clo", ".bbl", ".ist", ".mp", ".gif", ".tif", ".tiff"}
+MAX_BUILD_FILE_BYTES = 100 * 2**20
+MAX_BUILD_COPY_BYTES = 1024 * 2**20
 INPUT_COMMANDS = re.compile(
     r"\\(input|include|subfile|subfileinclude|includegraphics|includesvg|includepdf|"
     r"bibliography|addbibresource|usepackage|documentclass)\s*(?:\[[^\]]*\]\s*)*\{([^}]*)\}"
@@ -151,9 +155,11 @@ def settings_for(entry: Path, repository: Path) -> dict:
     )
     return {
         "project": shared.get("id") or "",
-        "name": manuscript.name if manuscript else entry.stem,
+        "name": manuscript.name if manuscript else workbench_projects.default_name(relative),
         "build": list(manuscript.build) if manuscript else [],
         "pdf": manuscript.pdf_path if manuscript else "",
+        "reviews": shared.get("reviews") or REVIEWS_DIRECTORY,
+        "context": list(manuscript.context) if manuscript else list(shared.get("context") or ()),
         "audience": shared.get("audience") or "",
         "writing_profile": shared.get("writing_profile") or "",
     }
@@ -167,8 +173,16 @@ def build_manuscript(
     latexmk: str = "latexmk",
     skip: bool = False,
     workspace: Path,
+    repository: Path | None = None,
 ) -> Build:
-    """Build the manuscript without writing into its repository (by default)."""
+    """Build the manuscript without writing into its repository (by default).
+
+    The default build runs latexmk in a temporary copy of the project's TeX
+    files (sources, packages, bibliographies, figures), laid out as in the
+    project, so that paths like `../related-work/references` and `\\include`
+    in subdirectories work as they do for the authors. The recorder file then
+    names the project files the build read.
+    """
     if skip:
         existing = pdf if pdf and pdf.is_file() else None
         return Build("skipped", pdf=existing, note="not rebuilt (--no-build)")
@@ -194,31 +208,63 @@ def build_manuscript(
                          "the project's build failed")
         return Build("ok", argv, built, recorded, log[-4000:])
     executable = shutil.which(latexmk)
-    output = workspace / "build"
-    output.mkdir(parents=True, exist_ok=True)
     argv = [latexmk, "-pdf", "-interaction=nonstopmode", "-halt-on-error",
-            "-file-line-error", "-recorder", f"-outdir={output}", entry.name]
+            "-file-line-error", "-recorder", entry.name]
     if executable is None:
         existing = pdf if pdf and pdf.is_file() else None
         return Build("missing-tool", argv, existing,
                      note=f"{latexmk} is not installed; install TeX Live with latexmk")
+    root = repository or entry.parent
+    copy = workspace / "build"
+    copy_tex_tree(root, copy)
+    copied_entry = copy / entry.relative_to(root)
     try:
         completed = subprocess.run(
-            argv, cwd=entry.parent, capture_output=True, text=True,
+            argv, cwd=copied_entry.parent, capture_output=True, text=True,
             timeout=BUILD_TIMEOUT_SECONDS, check=False,
         )
     except subprocess.TimeoutExpired:
         return Build("failed", argv, note="the build timed out")
     log = (completed.stdout or "") + (completed.stderr or "")
-    built = output / entry.with_suffix(".pdf").name
-    recorder = output / entry.with_suffix(".fls").name
-    recorded = _recorded_inputs(recorder, entry.parent) if recorder.is_file() else []
+    built = copied_entry.with_suffix(".pdf")
+    recorder = copied_entry.with_suffix(".fls")
+    recorded = [
+        root / path.relative_to(copy) if _inside(path, copy) else path
+        for path in (_recorded_inputs(recorder, copied_entry.parent) if recorder.is_file() else [])
+    ]
     if completed.returncode != 0 or not built.is_file():
         existing = pdf if pdf and pdf.is_file() else None
         return Build("failed", argv, existing, recorded, log[-4000:],
                      "latexmk failed" + ("; using the existing PDF, which may not match the sources"
                                          if existing else ""))
     return Build("ok", argv, built, recorded, log[-4000:])
+
+
+def copy_tex_tree(root: Path, destination: Path) -> None:
+    """Copy the files a LaTeX build may read, in the project's layout."""
+    total = 0
+    for directory, children, files in os.walk(root):
+        relative = Path(directory).relative_to(root)
+        children[:] = [
+            name for name in children
+            if name not in workbench_projects.SKIPPED_DIRECTORIES and not name.startswith(".")
+        ]
+        for name in files:
+            source = Path(directory) / name
+            if source.suffix.casefold() not in BUILD_SUFFIXES or not source.is_file():
+                continue
+            size = source.stat().st_size
+            if size > MAX_BUILD_FILE_BYTES:
+                continue
+            total += size
+            if total > MAX_BUILD_COPY_BYTES:
+                raise common.CodexError(
+                    f"{root} has more than {MAX_BUILD_COPY_BYTES // 2**20} MB of TeX files and "
+                    "figures; give the build command (--build) or a smaller project folder"
+                )
+            target = destination / relative / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
 
 
 def _recorded_inputs(recorder: Path, directory: Path) -> list[Path]:
@@ -520,15 +566,20 @@ def run_review(
     return destination
 
 
-def review_status(repository: Path, entry: Path | None = None) -> list[dict]:
-    """Every review below manuscript-reviews/, and whether its files changed since."""
-    reviews = repository / REVIEWS_DIRECTORY
+def review_status(
+    repository: Path, entry: Path | None = None, reviews_directory: str = REVIEWS_DIRECTORY
+) -> list[dict]:
+    """Every review in the project's reviews folder, and whether its files changed since."""
+    reviews = repository / reviews_directory
     rows = []
     relative_entry = entry.relative_to(repository).as_posix() if entry else None
     for manifest_path in sorted(reviews.glob("*/manifest.json")) if reviews.is_dir() else []:
         manifest = common.load_json(manifest_path)
-        if not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
-            continue
+        if (
+            not isinstance(manifest, dict) or manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION
+            or manifest.get("kind") not in KINDS or not isinstance(manifest.get("manuscript"), dict)
+        ):
+            continue  # not a review of this script (a reviews folder may hold others)
         if relative_entry and manifest.get("manuscript", {}).get("entry") != relative_entry:
             continue
         changed, missing = [], []
@@ -570,7 +621,10 @@ def review_status(repository: Path, entry: Path | None = None) -> list[dict]:
     return rows
 
 
-def manuscript_overview(repository: Path, manuscript: workbench_projects.Manuscript) -> dict:
+def manuscript_overview(
+    repository: Path, manuscript: workbench_projects.Manuscript,
+    reviews_directory: str = REVIEWS_DIRECTORY,
+) -> dict:
     """What the workbench shows of a repository's manuscript: PDF and reviews."""
     entry = repository / manuscript.entry
     pdf = repository / manuscript.pdf_path
@@ -590,7 +644,8 @@ def manuscript_overview(repository: Path, manuscript: workbench_projects.Manuscr
         # Not proof that the PDF matches, but a PDF older than a source does not.
         overview["pdfState"] = "current" if pdf.stat().st_mtime >= newest else "older than its sources"
     overview["reviews"] = [
-        {**row, "report": str(repository / row["report"])} for row in review_status(repository, entry)
+        {**row, "report": str(repository / row["report"])}
+        for row in review_status(repository, entry, reviews_directory)
     ]
     return overview
 
@@ -614,15 +669,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="writing criteria for the exposition review")
     parser.add_argument("--writing-profile-exclude", action="append", default=[], metavar="PATTERN")
     parser.add_argument("--context", action="append", type=Path, default=[], metavar="PATH",
-                        help="notes or results the mathematical reviewer may use; repeatable")
+                        help="notes or results the mathematical reviewer may use; repeatable; "
+                        "replaces the manuscript's context from loose-ends.toml")
     parser.add_argument("--build", metavar="COMMAND",
                         help="the project's build command, run next to the entry file")
     parser.add_argument("--no-build", action="store_true", help="use the existing PDF, if any")
     parser.add_argument("--pdf", type=Path, help="the compiled PDF (default: the entry as .pdf)")
     parser.add_argument("--latexmk", default="latexmk")
     parser.add_argument("--output-dir", type=Path,
-                        help=f"parent of the review directories (default: {REVIEWS_DIRECTORY}/ "
-                        "in the repository)")
+                        help="parent of the review directories (default: reviews = ... in "
+                        f"loose-ends.toml, else {REVIEWS_DIRECTORY}/ in the project folder)")
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--dry-run", action="store_true",
                         help="build, collect the files, and report, without a review")
@@ -652,8 +708,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not _inside(entry, repository):
             raise common.CodexError(f"{entry} is not inside {repository}")
+        settings = settings_for(entry, repository)
         if args.status:
-            rows = review_status(repository, entry)
+            rows = review_status(repository, entry, settings["reviews"])
             if not rows:
                 print(f"No reviews of {entry.relative_to(repository)} yet.")
             for row in rows:
@@ -663,7 +720,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{row['directory']}: {row['kind']} {row['verdict']} "
                       f"({row['agent']}/{row['model'] or 'default'}, {row['findings']} finding(s)); {state}")
             return 0
-        settings = settings_for(entry, repository)
         kinds = [kind for kind in KINDS if getattr(args, kind)] or list(KINDS)
         if args.build and args.no_build:
             raise common.CodexError("--build and --no-build exclude each other")
@@ -679,12 +735,16 @@ def main(argv: list[str] | None = None) -> int:
             else repository / settings["writing_profile"] if settings["writing_profile"]
             else None
         )
-        context = [path.expanduser().resolve() for path in args.context]
+        # --context replaces the manuscript's context from loose-ends.toml.
+        context = (
+            [path.expanduser().resolve() for path in args.context] if args.context
+            else [repository / path for path in settings["context"]]
+        )
         for path in context:
             if not path.exists():
                 raise common.CodexError(f"context not found: {path}")
         reviews = (args.output_dir.expanduser().resolve() if args.output_dir
-                   else repository / REVIEWS_DIRECTORY)
+                   else repository / settings["reviews"])
         options = codex_cli.model_options_from_args(args)
         exposition_options = codex_cli.inherit_model_options(
             options, codex_cli.model_options_from_args(args, prefix="exposition")
@@ -696,12 +756,14 @@ def main(argv: list[str] | None = None) -> int:
     workspace = Path(tempfile.mkdtemp(prefix="loose-ends-manuscript-build-"))
     try:
         build = build_manuscript(entry, command=command, pdf=pdf, latexmk=args.latexmk,
-                                 skip=args.no_build, workspace=workspace)
+                                 skip=args.no_build, workspace=workspace, repository=repository)
         files = manuscript_files(entry, repository, build, workspace)
         print(f"Manuscript {settings['name']}: {entry.relative_to(repository)} in {repository}")
         print(f"  build: {build.status}" + (f" ({build.note})" if build.note else ""))
         if build.status == "failed" and build.log_tail:
-            print("  " + "\n  ".join(build.log_tail.strip().splitlines()[-8:]))
+            lines = build.log_tail.strip().splitlines()
+            errors = [line for line in lines if line.startswith("!") or re.match(r"^\S+:\d+: ", line)]
+            print("  " + "\n  ".join((errors or lines)[-8:]))
         print(f"  {len(files)} file(s): " + ", ".join(path.relative_to(repository).as_posix() for path in files[:12])
               + (" …" if len(files) > 12 else ""))
         print("  PDF: " + ("yes" if build.pdf else "none; the reviewers read the sources only"))

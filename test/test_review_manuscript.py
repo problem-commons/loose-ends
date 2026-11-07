@@ -18,6 +18,7 @@ import codex_cli
 import open_problem_common as common
 import review_manuscript as review
 import source_references
+import workbench_projects
 from validation import manuscript_review as math_validation
 from test_write_paper import write_run_files
 from test_write_paper_exposition import PROFILE_FILES, reader_finding, reader_result, write_reader_output
@@ -443,7 +444,7 @@ class ReviewManuscriptTests(unittest.TestCase):
         text = out.getvalue()
         self.assertEqual(code, 0)
         self.assertIn("manuscript socg: socg/main.tex, no PDF, 0 review(s)", text)
-        self.assertIn("1 more LaTeX document(s) not listed: 2024/spanners/drafts/lemma.tex", text)
+        self.assertIn("1 more LaTeX document(s) too deep to be found: 2024/spanners/drafts/lemma.tex", text)
         self.assertIn("its notes can also be --context", text)
         self.assertIn(f'papers = ["{self.repository}"]', text)
         out = StringIO()
@@ -453,6 +454,84 @@ class ReviewManuscriptTests(unittest.TestCase):
         (notes / "loose-ends.toml").write_text(description, encoding="utf-8")
         [manuscript] = review.workbench_projects.read_paper_project(notes)["manuscripts"]
         self.assertEqual(manuscript.entry, "2024/spanners/drafts/lemma.tex")
+        # A folder of projects: the projects inside are registered, not the folder.
+        collection = self.root / "collection"
+        (collection / "Two watchmen" / "paper").mkdir(parents=True)
+        (collection / "Two watchmen" / "paper" / "main.tex").write_text(
+            "\\documentclass{article}\n", encoding="utf-8")
+        (collection / "Two watchmen" / "loose-ends.toml").write_text("schema_version = 1\n", encoding="utf-8")
+        out = StringIO()
+        with redirect_stdout(out):
+            scan_folders.main([str(collection), str(collection / "Two watchmen")])
+        text = out.getvalue()
+        self.assertIn("projects inside (own loose-ends.toml): Two watchmen", text)
+        self.assertIn("folder of projects", text)
+        self.assertIn(f'papers = ["{collection / "Two watchmen"}"]', text)
+
+    @unittest.skipUnless(LATEXMK, "latexmk and pdflatex are not installed")
+    def test_build_resolves_paths_as_in_the_project(self):
+        # A bibliography in a sibling folder and \\include of a subfolder fail
+        # when latexmk writes to an output directory; the copy builds them.
+        project = self.root / "Unlabeled motion planning"
+        (project / "paper" / "sections").mkdir(parents=True)
+        (project / "related-work").mkdir()
+        (project / "paper" / "main.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\n\\include{sections/intro}\n"
+            "\\bibliographystyle{plain}\n\\bibliography{../related-work/references}\n\\end{document}\n",
+            encoding="utf-8")
+        (project / "paper" / "sections" / "intro.tex").write_text("See~\\cite{knuth}.\n", encoding="utf-8")
+        (project / "related-work" / "references.bib").write_text(
+            "@book{knuth, author={D. Knuth}, title={TAOCP}, year={1968}, publisher={AW}}\n", encoding="utf-8")
+        (project / "data.npz").write_bytes(b"not copied")
+        entry = project / "paper" / "main.tex"
+        build = review.build_manuscript(entry, workspace=self.root / "build", repository=project)
+        self.assertEqual(build.status, "ok", build.log_tail)
+        self.assertFalse((self.root / "build" / "build" / "data.npz").exists())
+        files = review.manuscript_files(entry, project, build, self.root / "build")
+        self.assertEqual([path.relative_to(project).as_posix() for path in files],
+                         ["paper/main.tex", "paper/sections/intro.tex", "related-work/references.bib"])
+        self.assertEqual(sorted(path.name for path in project.rglob("*")),
+                         sorted(["paper", "sections", "related-work", "main.tex", "intro.tex",
+                                 "references.bib", "data.npz"]))
+
+    def test_reviews_folder_and_context_from_the_description(self):
+        (self.entry.parent / "main.pdf").write_bytes(b"%PDF-paper")
+        (self.repository / "STATUS.md").write_text("# Status\n\nTheorem 1 awaits review.\n", encoding="utf-8")
+        (self.repository / "proofs").mkdir()
+        (self.repository / "proofs" / "theorem.md").write_text("# Proof\n", encoding="utf-8")
+        (self.repository / "reviews").mkdir()
+        (self.repository / "reviews" / "2026-11-04-audit-claude.md").write_text("# Audit\n", encoding="utf-8")
+        (self.repository / "reviews" / "older").mkdir()
+        common.write_json(self.repository / "reviews" / "older" / "manifest.json", {"schema_version": 1})
+        (self.repository / "loose-ends.toml").write_text(
+            'schema_version = 1\nreviews = "reviews"\ncontext = ["STATUS.md", "proofs"]\n\n'
+            '[[manuscript]]\nentry = "socg/main.tex"\n', encoding="utf-8")
+        seen: dict = {}
+        code, output = self.run_main("--no-build", "--math", fake=self.recording_fake(seen))
+        self.assertEqual(code, 0, output)
+        self.assertTrue({"context/01-STATUS.md", "context/02-proofs/theorem.md"} <= seen["math"]["inputs"])
+        [directory] = [path for path in (self.repository / "reviews").iterdir() if "-socg-math-" in path.name]
+        [row] = review.review_status(self.repository, self.entry, "reviews")
+        self.assertEqual(row["directory"], f"reviews/{directory.name}")
+        self.assertFalse((self.repository / "manuscript-reviews").exists())
+        # --context replaces the described context.
+        notes = self.root / "notes.md"
+        notes.write_text("# Notes\n", encoding="utf-8")
+        code, output = self.run_main("--no-build", "--math", "--context", str(notes),
+                                     fake=self.recording_fake(seen))
+        self.assertEqual(code, 0, output)
+        self.assertEqual({path for path in seen["math"]["inputs"] if path.startswith("context/")},
+                         {"context/01-notes.md"})
+        (self.repository / "loose-ends.toml").write_text(
+            'schema_version = 1\ncontext = ["gone.md"]\n', encoding="utf-8")
+        code, output = self.run_main("--no-build", "--math", fake=self.recording_fake(seen))
+        self.assertEqual(code, 1)
+        self.assertIn("context not found", output)
+
+    def test_names_from_folders_with_spaces(self):
+        self.assertEqual(workbench_projects.default_name("Uncertain Polygons/paper/main.tex"),
+                         "Uncertain-Polygons-paper")
+        self.assertEqual(workbench_projects.slug("KB_ min-sum motion planning"), "KB_-min-sum-motion-planning")
 
 
 if __name__ == "__main__":

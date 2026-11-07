@@ -1210,8 +1210,9 @@ Without `--math` or `--exposition`, both reviews run:
 
 - The mathematical reviewer checks every statement and proof, tries to
   falsify the main results, and may search the web (`--web-search`, default
-  `live`). It also sees the `--context` files (research notes, attempts),
-  which it treats as evidence to check against, not as truth. Its report has
+  `live`). It also sees the context: the manuscript's `context` from
+  `loose-ends.toml`, or the `--context` files instead (research notes,
+  attempts), which it treats as evidence to check against, not as truth. Its report has
   findings `M-001`, ... and a verdict `no_issues_found`,
   `needs_minor_revision`, `needs_major_revision`, or `incorrect`, and lists
   every statement as verified, gap, incorrect, or not checked.
@@ -1221,8 +1222,10 @@ Without `--math` or `--exposition`, both reviews run:
   (`--exposition-web-search`). Its model is set with `--exposition-agent`,
   `--exposition-model`, ... and defaults to the mathematical reviewer's.
 
-The manuscript is first built with `latexmk -recorder` into a temporary
-directory, so the repository gets no build files; `--build "make paper"` runs
+The manuscript is first built with `latexmk -recorder` in a temporary copy of
+the project folder's TeX files and figures, laid out as in the project (so
+`\bibliography{../related-work/references}` and `\include` work), and the
+repository gets no build files; `--build "make paper"` runs
 the project's own build next to the entry file instead, and `--no-build` uses
 the existing PDF (`--pdf FILE`, default the entry as `.pdf`). The reviewers get
 copies of exactly the files the build read inside the repository (sources,
@@ -1232,8 +1235,9 @@ used and the manifest says so; without a PDF the reviewers read the sources.
 `--dry-run` builds and lists the files without a review.
 
 Each review lands in its own directory
-`manuscript-reviews/<date>-<manuscript>-<math|exposition>-<agent>-<random>/` of
-the manuscript's project folder: the nearest folder with a `loose-ends.toml`,
+`manuscript-reviews/<date>-<manuscript>-<math|exposition>-<agent>-<random>/` (or
+below `reviews = "..."` from `loose-ends.toml`) of the manuscript's project
+folder: the nearest folder with a `loose-ends.toml`,
 else the root of its git checkout, else the entry's folder (`--repository
 DIR` sets it; the workbench passes the paper project's folder). The directory
 holds the report (`math-review.md` or `exposition-review.md`), `review.json`,
@@ -1437,13 +1441,20 @@ id = "oriented-spanners"
 title = "Oriented spanners"
 writing_profile = "writing/cg"      # optional, repository-relative
 audience = "computational geometers"
+reviews = "reviews"                 # optional; default: manuscript-reviews
+context = ["STATUS.md", "proofs"]   # optional; for the mathematical reviewer
 
 [[manuscript]]
 name = "socg"
 entry = "socg/main.tex"
 build = ["latexmk", "-pdf", "main.tex"]   # optional; run next to the entry
 pdf = "socg/main.pdf"                     # optional; default: the entry as .pdf
+context = ["notes/socg"]                  # optional; instead of the project's
 ```
+
+A folder with several projects (one per subfolder, each with its own status
+and reviews) gets one `loose-ends.toml` per project folder; each is then a
+paper project of its own.
 
 Without it, LaTeX files with `\documentclass` up to two levels deep are taken
 as entry points (`socg/main.tex` is named `socg`).

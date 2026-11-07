@@ -3826,6 +3826,8 @@ function renderRepositoryManuscript(item) {
   fact("Build", manuscript.build?.length ? manuscript.build.join(" ") : "latexmk into a temporary directory");
   fact("Audience", project.audience);
   fact("Writing profile", project.writingProfile);
+  fact("Context", (manuscript.context || []).join(", "));
+  fact("Reviews folder", project.reviews && project.reviews !== "manuscript-reviews" ? `${project.reviews}/` : "");
   fact("Description", project.described ? "loose-ends.toml" : "detected (no loose-ends.toml)");
   facts.append(list);
   if (manuscript.pdfState === "older than its sources") {
@@ -3878,6 +3880,7 @@ function renderRepositoryManuscript(item) {
     ].filter(Boolean).join(" · ");
     card.append(node("small", "", details));
     if (review.context?.length) card.append(node("small", "", `Context: ${review.context.join("; ")}`));
+    else if (review.kind === "math") card.append(node("small", "", "Context: none"));
     if (review.writing_profile) card.append(node("small", "", `Writing profile: ${review.writing_profile}`));
     if (!review.current) {
       const changed = [...review.changed, ...review.missing.map(path => `${path} (missing)`)];
@@ -3924,7 +3927,7 @@ function manuscriptReviewSettings(options) {
     grid.append(field("contextPaths", "Context for the mathematical reviewer", {
       type: "textarea", value: options.contextPaths || "", full: true,
       placeholder: "~/problem-commons/pool/papers/own/…/OP-001/attempt-002",
-      help: "Files or directories, one per line: research notes or attempts the reviewer checks the manuscript against. The exposition reader never sees them.",
+      help: "Files or directories, one per line: research notes or attempts the reviewer checks the manuscript against. Blank: the manuscript's context from loose-ends.toml; anything here replaces it. The exposition reader never sees them.",
     }));
   }
   if (["both", "exposition"].includes(kind)) {

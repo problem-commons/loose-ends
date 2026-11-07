@@ -74,19 +74,32 @@ def scan(folder: Path) -> dict:
         report["error"] = str(exc)
     report["described"] = shared.get("described", False)
     report["id"] = shared.get("id")
+    report["reviews"] = shared.get("reviews") or projects.DEFAULT_REVIEWS
     manuscripts = []
     for manuscript in shared["manuscripts"]:
-        overview = review_manuscript.manuscript_overview(folder, manuscript)
+        overview = review_manuscript.manuscript_overview(
+            folder, manuscript, shared.get("reviews") or projects.DEFAULT_REVIEWS
+        )
         manuscripts.append(overview)
     report["manuscripts"] = manuscripts
     listed = {item["entry"] for item in manuscripts}
-    deeper, material = [], Counter()
+    deeper, material, inner = [], Counter(), []
     for relative, _depth in _walk(folder):
         kind = MATERIAL_SUFFIXES.get(relative.suffix.casefold())
         if kind:
             material[kind] += 1
+        if relative.name == projects.SHARED_PROJECT_FILE and relative.parent.parts:
+            inner.append(relative.parent.as_posix())
         if relative.suffix == ".tex" and relative.as_posix() not in listed and _is_document(folder / relative):
             deeper.append(relative.as_posix())
+    # Folders below with a loose-ends.toml are projects of their own.
+    report["projects_inside"] = sorted(inner)
+    if not report["described"] and inner:
+        report["manuscripts"] = [
+            item for item in manuscripts
+            if not any(item["entry"].startswith(f"{path}/") for path in inner)
+        ]
+        deeper = [path for path in deeper if not any(path.startswith(f"{inner_path}/") for inner_path in inner)]
     report["unlisted_documents"] = deeper
     report["material"] = material
     return report
@@ -115,7 +128,7 @@ def _print(report: dict) -> None:
     if report["error"]:
         print(f"  loose-ends.toml: {report['error']}")
     elif report["described"]:
-        print(f"  loose-ends.toml: id {report['id'] or '(none)'}")
+        print(f"  loose-ends.toml: id {report['id'] or '(none)'}; reviews in {report['reviews']}/")
     else:
         print("  loose-ends.toml: none; manuscripts are detected (\\documentclass up to two levels deep)")
     for item in report["manuscripts"]:
@@ -124,10 +137,17 @@ def _print(report: dict) -> None:
         outdated = sum(not review["current"] for review in reviews)
         print(f"  manuscript {item['name']}: {item['entry']}, {pdf}, "
               f"{len(reviews)} review(s)" + (f", {outdated} outdated" if outdated else ""))
+        if item.get("context"):
+            missing = [path for path in item["context"] if not (folder / path).exists()]
+            print("    context: " + ", ".join(item["context"])
+                  + (f" (missing: {', '.join(missing)})" if missing else ""))
+    if report["projects_inside"]:
+        print("  projects inside (own loose-ends.toml): " + ", ".join(report["projects_inside"]))
     unlisted = report["unlisted_documents"]
     if unlisted:
         examples = ", ".join(unlisted[:4]) + (" …" if len(unlisted) > 4 else "")
-        print(f"  {len(unlisted)} more LaTeX document(s) not listed: {examples}")
+        where = "not in loose-ends.toml" if report["described"] else "too deep to be found"
+        print(f"  {len(unlisted)} more LaTeX document(s) {where}: {examples}")
     if report["material"]:
         print("  material: " + ", ".join(f"{count} {kind}" for kind, count in report["material"].most_common()))
     print("  use: " + _advice(report))
@@ -142,10 +162,13 @@ def _advice(report: dict) -> str:
 
 
 def _project_advice(report: dict) -> str:
+    if report["projects_inside"] and not report["described"]:
+        return ("folder of projects: add the projects inside to papers = [...], not this folder"
+                + ("; it has further manuscripts of its own" if report["manuscripts"] else ""))
     if report["manuscripts"]:
         advice = ("paper project: add it to papers = [...] in ~/.config/problem-commons/workbench.toml "
                   "(or --paper), then review from the Manuscripts page")
-        if report["unlisted_documents"]:
+        if report["unlisted_documents"] and not report["described"]:
             advice += "; list the other documents in loose-ends.toml (--toml prints a start)"
         return advice
     if report["unlisted_documents"]:
@@ -167,6 +190,8 @@ def suggested_description(report: dict) -> str:
         f'title = "{folder.name}"',
         '# audience = "computational geometers"',
         '# writing_profile = "writing/my-style"   # a folder inside this repository',
+        '# reviews = "reviews"                     # default: manuscript-reviews',
+        '# context = ["STATUS.md", "proofs"]       # for the mathematical reviewer',
     ]
     names: set[str] = set()
     for entry in entries:
@@ -195,7 +220,10 @@ def main(argv: list[str] | None = None) -> int:
     for report in reports:
         _print(report)
         print()
-    papers = [str(report["folder"]) for report in reports if report.get("manuscripts")]
+    papers = [
+        str(report["folder"]) for report in reports
+        if report.get("manuscripts") and (report["described"] or not report["projects_inside"])
+    ]
     if papers:
         print("For ~/.config/problem-commons/workbench.toml:")
         print("papers = [" + ", ".join(f'"{path}"' for path in papers) + "]")

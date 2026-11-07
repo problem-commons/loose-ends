@@ -30,7 +30,7 @@ apply only to its own paper root.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -44,6 +44,7 @@ PROJECT_KINDS = ("pool", "papers", "paper")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SHARED_PROJECT_FILE = "loose-ends.toml"
 # Directories never searched for LaTeX entry points of an undescribed repository.
+DEFAULT_REVIEWS = "manuscript-reviews"
 SKIPPED_DIRECTORIES = {".git", "node_modules", "__pycache__", ".loose-ends", "manuscript-reviews"}
 MAX_DETECTION_DEPTH = 2
 
@@ -60,6 +61,8 @@ class Manuscript:
     entry: str
     build: tuple[str, ...] = ()
     pdf: str = ""
+    # Repository-relative files or folders the mathematical reviewer gets.
+    context: tuple[str, ...] = ()
 
     @property
     def pdf_path(self) -> str:
@@ -71,6 +74,7 @@ class Manuscript:
             "entry": self.entry,
             "build": list(self.build),
             "pdf": self.pdf_path,
+            "context": list(self.context),
         }
 
 
@@ -161,12 +165,25 @@ def _relative(value: object, where: str) -> str:
     return relative.as_posix()
 
 
+def slug(text: str) -> str:
+    """A name of letters, digits, . _ - from a folder or file name."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-.") or "project"
+
+
 def default_name(entry: str) -> str:
     """socg/main.tex is "socg"; paper.tex and notes/long.tex keep their names."""
     path = PurePosixPath(entry)
     if path.name == "main.tex" and len(path.parts) > 1:
-        return "-".join(path.parent.parts)
-    return "-".join(path.with_suffix("").parts)
+        return slug("-".join(path.parent.parts))
+    return slug("-".join(path.with_suffix("").parts))
+
+
+def _paths(value: object, where: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, list):
+        raise ProjectError(f"{where} must be a list of repository-relative paths")
+    return tuple(_relative(item, where) for item in value)
 
 
 def detect_manuscripts(repository: Path) -> tuple[Manuscript, ...]:
@@ -208,22 +225,27 @@ def read_paper_project(repository: Path) -> dict:
         title = "Oriented spanners"
         writing_profile = "writing/cg"      # optional, repository-relative
         audience = "computational geometers"
+        reviews = "reviews"                 # optional, default: manuscript-reviews
+        context = ["STATUS.md", "proofs"]   # optional: for the mathematical reviewer
 
         [[manuscript]]
         name = "socg"                       # unique in the project
         entry = "socg/main.tex"             # repository-relative LaTeX entry
         build = ["latexmk", "-pdf", "main.tex"]   # optional, run next to entry
         pdf = "socg/main.pdf"               # optional, default: entry as .pdf
+        context = ["notes/socg"]            # optional, instead of the project's
 
     Without the file, LaTeX entry points are detected and nothing else is
     assumed. Shared descriptions contain no machine-specific paths.
     """
     path = repository / SHARED_PROJECT_FILE
     if not path.is_file():
-        return {"described": False, "manuscripts": detect_manuscripts(repository)}
+        return {"described": False, "reviews": DEFAULT_REVIEWS, "context": (),
+                "manuscripts": detect_manuscripts(repository)}
     value = _load_document(path)
     if value.get("schema_version") != PROJECTS_SCHEMA_VERSION:
         raise ProjectError(f"{path}: expected schema_version = {PROJECTS_SCHEMA_VERSION}")
+    context = _paths(value.get("context"), f"{path} context")
     manuscripts = []
     names: set[str] = set()
     for index, raw in enumerate(value.get("manuscript", [])):
@@ -240,19 +262,25 @@ def read_paper_project(repository: Path) -> dict:
             entry,
             _command(raw.get("build"), f"{where} build"),
             _relative(raw["pdf"], f"{where} pdf") if raw.get("pdf") else "",
+            _paths(raw["context"], f"{where} context") if "context" in raw else context,
         ))
     for key in ("id", "title", "audience", "writing_profile"):
         if key in value and not isinstance(value[key], str):
             raise ProjectError(f"{path}: {key} must be a string")
     if value.get("writing_profile"):
         _relative(value["writing_profile"], f"{path} writing_profile")
+    reviews = _relative(value["reviews"], f"{path} reviews") if value.get("reviews") else DEFAULT_REVIEWS
     return {
         "described": True,
+        "reviews": reviews,
+        "context": context,
         "id": value.get("id", ""),
         "title": value.get("title", ""),
         "audience": value.get("audience", ""),
         "writing_profile": value.get("writing_profile", ""),
-        "manuscripts": tuple(manuscripts) or detect_manuscripts(repository),
+        "manuscripts": tuple(manuscripts) or tuple(
+            replace(item, context=context) for item in detect_manuscripts(repository)
+        ),
     }
 
 
@@ -266,7 +294,7 @@ def _project(raw: object, base: Path, index: int) -> Project:
         raise ProjectError(f"{where}: kind must be one of {', '.join(PROJECT_KINDS)}")
     if kind == "paper":
         path = _resolve(raw.get("path"), base, f"{where} path")
-        name = name or path.name
+        name = name or slug(path.name)
     else:
         papers = _resolve(raw.get("papers"), base, f"{where} papers")
         name = name or papers.parent.name
