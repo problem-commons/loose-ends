@@ -16,6 +16,7 @@ const state = {
     paperRoots: [],
     paperTargets: [],
     labelCommand: false,
+    projects: [],
     taskDefaults: {},
   },
   tab: "research",
@@ -38,6 +39,10 @@ const state = {
   selectedPaper: "",
   selectedManuscript: "",
   selectedDraft: "",
+  // Manuscripts in paper repositories (kind = "paper" projects), loaded on demand.
+  paperProjects: null,
+  paperProjectsLoad: null,
+  paperProjectsSignature: "",
   manuscriptDraftSelections: new Map(),
   selectedJob: "",
   detailTab: "attempt",
@@ -188,6 +193,9 @@ function currentUrl() {
   } else if (state.tab === "manuscripts") {
     reviewModel.manuscriptFiltersToSearchParams(parameters, state.manuscriptFilters);
     const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
+    if (state.selectedManuscript.startsWith("repo:")) {
+      parameters.set("repository", state.selectedManuscript.slice(5));
+    }
     if (manuscript) {
       parameters.set("manuscript", manuscript.urlKey || manuscript.path);
       const draft = manuscript.drafts.find(value => value.key === state.selectedDraft);
@@ -281,8 +289,10 @@ function applyLocation({ scrollY } = {}) {
     const manuscript = state.catalog.manuscripts.find(
       item => item.urlKey === requested || item.path === requested,
     );
-    state.selectedManuscript = manuscript?.key || "";
+    const repository = parameters.get("repository");
+    state.selectedManuscript = manuscript?.key || (repository ? `repo:${repository}` : "");
     state.revealSidebarSelection = Boolean(manuscript);
+    if (repository && !manuscript) state.revealSidebarSelection = true;
     const requestedDraft = parameters.get("draft");
     state.selectedDraft = manuscript?.drafts.find(
       draft => draft.name === requestedDraft || draft.urlKey === requestedDraft,
@@ -1776,6 +1786,10 @@ function organizeFilterNodes(kind) {
     return wrapper;
   };
   const nodes = [];
+  const projects = reviewModel.projectOptions(rows);
+  if (projects.length > 2 || filters().project !== "all") {
+    nodes.push(select("Project", "project", projects));
+  }
   const collections = reviewModel.collectionOptions(rows);
   if (collections.length > 2 || filters().collection !== "all") {
     nodes.push(select("Collection", "collection", collections));
@@ -1834,6 +1848,9 @@ function organizeTagsNode(item) {
 
 function labelBadges(item) {
   const wrapper = node("div", "badges label-badges");
+  if (item.project?.name && (state.settings.projects || []).length > 1) {
+    wrapper.append(node("span", "badge project", `project ${item.project.name}`));
+  }
   if (item.collection) wrapper.append(node("span", "badge collection", `collection ${item.collection}`));
   (item.labels || []).forEach(label => {
     const value = node("span", `badge ${label.hidden ? "warn" : "label"}`, label.label);
@@ -2211,10 +2228,11 @@ function renderResearch() {
       + hiddenNote(state.catalog.reviews, state.researchFilters)));
   for (const group of paperGroups) {
     const paperHeading = node("div", "sidebar-heading paper-heading");
+    const groupProject = group.problems[0]?.project?.name;
     const paperHeadingLabel = reviewModel.paperTitleWithYear(
       group.paperTitle,
       group.publicationTimestamp,
-    );
+    ) + (groupProject && (state.settings.projects || []).length > 1 ? ` · ${groupProject}` : "");
     const paperHeadingTitle = inlineMarkdown("span", "paper-heading-title", paperHeadingLabel);
     paperHeadingTitle.title = paperHeadingLabel;
     paperHeading.append(
@@ -2561,7 +2579,7 @@ function renderReviewDetail(item) {
   copy.append(inlineMarkdown("div", "eyebrow", `${paperTitle} · ${item.problemId}`));
   copy.append(inlineMarkdown("h1", "", item.problemTitle));
   copy.append(node("p", "", item.paperAuthors?.join(", ") || "Authors unavailable"));
-  if (item.collection || item.labels?.length) copy.append(labelBadges(item));
+  if (item.project || item.collection || item.labels?.length) copy.append(labelBadges(item));
   hero.append(copy, heroActions("problem", item));
   shell.append(hero);
 
@@ -2815,7 +2833,8 @@ function renderPapers() {
       paper.title,
       paper.publicationTimestamp,
     ),
-    meta: paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed",
+    meta: (paper.project?.name && (state.settings.projects || []).length > 1 ? `${paper.project.name} · ` : "")
+      + (paper.analyzed ? `${paper.problemCount} open problems` : "Not analyzed"),
     tags: reviewModel.organizeTags(paper).length ? organizeTagsNode(paper) : undefined,
     active: state.selectedPaper === paper.key,
     selectedTarget: paperTarget(paper),
@@ -2868,7 +2887,7 @@ function renderPapers() {
   badges.append(badge(paper.analyzed ? "analyzed" : "not analyzed", paper.analyzed ? "succeeded" : "warn"));
   if (paper.analyzed) badges.append(badge(`${paper.problemCount} problems`, "neutral"));
   copy.append(badges);
-  if (paper.collection || paper.labels?.length) copy.append(labelBadges(paper));
+  if (paper.project || paper.collection || paper.labels?.length) copy.append(labelBadges(paper));
   hero.append(copy, heroActions("paper", paper));
   shell.append(hero);
   const actions = node("div", "actions");
@@ -3435,7 +3454,10 @@ function renderManuscripts() {
     return controls;
   });
   const manuscripts = reviewModel.sortManuscripts(filteredManuscripts(), state.manuscriptSort);
-  if (!manuscripts.some(value => value.key === state.selectedManuscript)) {
+  const repositoryItems = filteredRepositoryManuscripts();
+  const repositoryItem = repositoryItems.find(value => value.key === state.selectedManuscript);
+  const awaitingRepositories = state.selectedManuscript.startsWith("repo:") && state.paperProjects === null;
+  if (!repositoryItem && !awaitingRepositories && !manuscripts.some(value => value.key === state.selectedManuscript)) {
     state.selectedManuscript = reviewModel.nearestMatchingKey(
       state.selectedManuscript,
       manuscripts.map(value => value.key),
@@ -3464,7 +3486,37 @@ function renderManuscripts() {
     });
   });
   manuscriptScroll.append(node("div", "sidebar-heading", `${manuscripts.length} manuscripts`), list);
+  if (paperProjectsConfigured()) {
+    const repositoryList = node("div", "side-list");
+    repositoryItems.forEach(value => {
+      const outdated = value.manuscript.reviews.filter(review => !review.current).length;
+      appendSideCard(repositoryList, {
+        title: `${value.project.title || value.project.name} · ${value.manuscript.name}`,
+        meta: [
+          value.manuscript.entry,
+          value.manuscript.pdfState === "missing" ? "no PDF" : `PDF ${value.manuscript.pdfState}`,
+          `${value.manuscript.reviews.length} review${value.manuscript.reviews.length === 1 ? "" : "s"}${outdated ? ` (${outdated} outdated)` : ""}`,
+        ].join(" · "),
+        active: state.selectedManuscript === value.key,
+        onClick: () => {
+          state.selectedManuscript = value.key;
+          syncNavigation();
+        },
+      });
+    });
+    const heading = state.paperProjects === null
+      ? "Paper repositories · loading…"
+      : `Paper repositories · ${repositoryItems.length} manuscript${repositoryItems.length === 1 ? "" : "s"}`;
+    manuscriptScroll.append(node("div", "sidebar-heading", heading), repositoryList);
+    paperProjectProblems().forEach(message => manuscriptScroll.append(node("small", "sidebar-note", message)));
+    if (state.paperProjects === null) loadPaperProjects();
+  }
   sidebar.append(manuscriptScroll);
+  if (state.selectedManuscript.startsWith("repo:")) {
+    if (repositoryItem) renderRepositoryManuscript(repositoryItem);
+    else main.replaceChildren(document.getElementById("empty-template").content.cloneNode(true));
+    return;
+  }
   const manuscript = state.catalog.manuscripts.find(value => value.key === state.selectedManuscript);
   if (!manuscript) {
     state.selectedDraft = "";
@@ -3509,6 +3561,9 @@ function renderManuscripts() {
   copy.append(node("div", "eyebrow", `${manuscript.name} · ${draft.name}`));
   copy.append(inlineMarkdown("h1", "", draft.title));
   const badges = node("div", "badges");
+  if (manuscript.project?.name && (state.settings.projects || []).length > 1) {
+    badges.append(node("span", "badge project", `project ${manuscript.project.name}`));
+  }
   badges.append(badge(draft.status || "draft", "neutral"));
   badges.append(badge(draft.verdict, draft.verdict === "ready_for_expert_review" ? "succeeded" : "warn"));
   if (draft.expositionVerdict) {
@@ -3641,6 +3696,273 @@ function renderManuscripts() {
   shell.append(catalogTranscriptFold("draft", draft));
   main.replaceChildren(shell);
   refreshVisibleCodexLogs();
+}
+
+function paperProjectsConfigured() {
+  return (state.settings.projects || []).some(project => project.kind === "paper");
+}
+
+function loadPaperProjects() {
+  if (state.paperProjectsLoad) return state.paperProjectsLoad;
+  state.paperProjectsLoad = api("/api/paper-projects")
+    .then(value => {
+      state.paperProjects = value.projects || [];
+    })
+    .catch(error => {
+      state.paperProjects = state.paperProjects || [];
+      showNotice(`Could not read the paper repositories: ${error.message}`, true);
+    })
+    .finally(() => {
+      state.paperProjectsLoad = null;
+      if (navigationReady && state.tab === "manuscripts") {
+        syncNavigation({ replace: true, preserveScroll: true });
+      }
+    });
+  return state.paperProjectsLoad;
+}
+
+function repositoryManuscripts() {
+  return (state.paperProjects || []).flatMap(project =>
+    (project.manuscriptsInRepository || [])
+      .filter(manuscript => manuscript.entryPath)
+      .map(manuscript => ({ key: `repo:${manuscript.entryPath}`, project, manuscript }))
+  );
+}
+
+function filteredRepositoryManuscripts() {
+  const needle = (state.search || "").trim().toLowerCase();
+  return repositoryManuscripts().filter(value =>
+    !needle || [value.project.name, value.project.title, value.manuscript.name, value.manuscript.entry]
+      .join(" ").toLowerCase().includes(needle)
+  );
+}
+
+function paperProjectProblems() {
+  return (state.paperProjects || []).flatMap(project => {
+    if (project.status !== "ok") return [`${project.name}: ${project.status} (${project.path})`];
+    if (project.error) return [`${project.name}: ${project.error}`];
+    if (!(project.manuscriptsInRepository || []).length) return [`${project.name}: no LaTeX manuscript found`];
+    return [];
+  });
+}
+
+function latexTarget(item) {
+  return target("latex", item.manuscript.entryPath, `${item.project.name}: ${item.manuscript.entry}`);
+}
+
+function reviewVerdictTone(verdict) {
+  if (["no_issues_found", "clear"].includes(verdict)) return "succeeded";
+  if (["needs_major_revision", "incorrect"].includes(verdict)) return "warn";
+  return "neutral";
+}
+
+function renderRepositoryManuscript(item) {
+  const { project, manuscript } = item;
+  const shell = node("div", "main-inner");
+  const hero = node("section", "hero");
+  const copy = node("div");
+  copy.append(node("div", "eyebrow", `${project.name} · paper repository`));
+  copy.append(node("h1", "", `${project.title || project.name} · ${manuscript.name}`));
+  const badges = node("div", "badges");
+  if ((state.settings.projects || []).length > 1) {
+    badges.append(node("span", "badge project", `project ${project.name}`));
+  }
+  badges.append(badge(
+    manuscript.pdfState === "missing" ? "no PDF" : `PDF ${manuscript.pdfState}`,
+    manuscript.pdfState === "current" ? "succeeded" : "warn",
+  ));
+  const latest = {};
+  manuscript.reviews.forEach(review => { latest[review.kind] = review; });
+  for (const [kind, label] of [["math", "mathematics"], ["exposition", "exposition"]]) {
+    const review = latest[kind];
+    if (!review) continue;
+    badges.append(badge(
+      `${label}: ${humanize(review.verdict)}${review.current ? "" : " (outdated)"}`,
+      review.current ? reviewVerdictTone(review.verdict) : "neutral",
+    ));
+  }
+  copy.append(badges);
+  hero.append(copy);
+  shell.append(hero);
+
+  const actions = node("div", "actions");
+  const targets = [latexTarget(item)];
+  actions.append(
+    button("Review mathematics", () => openTask("manuscript-review", targets, { reviewKind: "math" }), "button primary"),
+    button("Review exposition", () => openTask("manuscript-review", targets, { reviewKind: "exposition" })),
+    button("Review both", () => openTask("manuscript-review", targets, { reviewKind: "both" })),
+    button("Check build", () => openTask("manuscript-review", targets, { reviewKind: "check" })),
+  );
+  if (manuscript.pdfState !== "missing") {
+    const open = node("a", "button", "Open PDF");
+    open.href = artifactViewUrl(manuscript.pdfPath);
+    open.target = "_blank";
+    actions.append(open);
+  }
+  actions.append(button("Refresh", () => { state.paperProjects = null; loadPaperProjects(); }));
+  shell.append(actions);
+
+  const facts = node("section", "panel");
+  facts.append(node("h2", "", "Manuscript"));
+  const list = node("dl", "fact-list");
+  const fact = (label, value) => {
+    if (!value) return;
+    list.append(node("dt", "", label), node("dd", "", value));
+  };
+  fact("Folder", project.path);
+  const source = project.source || {};
+  if (source.commit) {
+    fact("Repository", [
+      `${source.repository || "local checkout (no hosted remote)"}${source.path && source.path !== "." ? `:${source.path}` : ""}`,
+      `commit ${source.commit.slice(0, 10)}`,
+      source.committed === false ? "uncommitted changes" : "",
+      source.pushed === false ? "not pushed" : "",
+    ].filter(Boolean).join(" · "));
+  } else {
+    fact("Repository", "not a git checkout: reviews identify the manuscript by file hashes only");
+  }
+  fact("Entry", manuscript.entry);
+  fact("PDF", manuscript.pdf);
+  fact("Build", manuscript.build?.length ? manuscript.build.join(" ") : "latexmk into a temporary directory");
+  fact("Audience", project.audience);
+  fact("Writing profile", project.writingProfile);
+  fact("Context", (manuscript.context || []).join(", "));
+  fact("Reviews folder", project.reviews && project.reviews !== "manuscript-reviews" ? `${project.reviews}/` : "");
+  fact("Description", project.described ? "loose-ends.toml" : "detected (no loose-ends.toml)");
+  facts.append(list);
+  if (manuscript.pdfState === "older than its sources") {
+    facts.append(node("p", "help", "The PDF is older than one of its sources. Reviews build the manuscript themselves; rebuild it in the repository to read the current version here."));
+  }
+  shell.append(facts);
+
+  const jobs = state.jobs.filter(job =>
+    job.action === "manuscript-review" &&
+    taskTargets(job).some(value => normalizedPath(value.path) === normalizedPath(manuscript.entryPath))
+  );
+  if (jobs.length) {
+    const panel = node("section", "related-tasks panel");
+    const heading = node("div", "related-tasks-heading");
+    heading.append(node("h2", "", "Review tasks"), badge(`${jobs.length} task${jobs.length === 1 ? "" : "s"}`, "neutral"));
+    const rows = node("div", "related-task-list");
+    jobs.slice(0, 8).forEach(job => {
+      const row = button("", () => openRelatedTask(job.id), "related-task-row");
+      const text = node("span", "related-task-copy");
+      text.append(node("strong", "", job.title || taskActionTitle(job.action)), node("small", "", taskSidebarMeta(job)));
+      row.append(taskStatusBadge(job.status), text, node("span", "related-task-arrow", "›"));
+      rows.append(row);
+    });
+    panel.append(heading, rows);
+    shell.append(panel);
+  }
+
+  const reviewsHeading = node("div", "section-title");
+  reviewsHeading.append(node("h2", "", `Reviews · ${manuscript.reviews.length}`));
+  shell.append(reviewsHeading);
+  if (!manuscript.reviews.length) {
+    shell.append(node("p", "help", "No reviews yet. Reviews are stored in manuscript-reviews/ in the repository; commit them to share them."));
+  }
+  const reviewList = node("div", "repository-reviews");
+  [...manuscript.reviews].reverse().forEach(review => {
+    const card = node("section", "panel repository-review");
+    const top = node("div", "badges");
+    top.append(
+      node("strong", "", review.kind === "math" ? "Mathematics" : "Exposition"),
+      badge(review.verdict, reviewVerdictTone(review.verdict)),
+      badge(review.current ? "current" : "outdated", review.current ? "succeeded" : "warn"),
+    );
+    card.append(top);
+    const details = [
+      review.generated_at ? new Date(review.generated_at).toLocaleString() : "",
+      `${review.agent || "codex"}${review.model ? ` · ${review.model}` : ""}`,
+      `${review.findings} finding${review.findings === 1 ? "" : "s"}`,
+      review.commit ? `commit ${review.commit.slice(0, 10)}${review.uncommitted.length ? " + uncommitted changes" : ""}` : "",
+      review.build ? `build ${review.build}` : "",
+    ].filter(Boolean).join(" · ");
+    card.append(node("small", "", details));
+    if (review.context?.length) card.append(node("small", "", `Context: ${review.context.join("; ")}`));
+    else if (review.kind === "math") card.append(node("small", "", "Context: none"));
+    if (review.writing_profile) card.append(node("small", "", `Writing profile: ${review.writing_profile}`));
+    if (!review.current) {
+      const changed = [...review.changed, ...review.missing.map(path => `${path} (missing)`)];
+      card.append(node("p", "help", `Changed since: ${changed.join(", ")}`));
+    }
+    const links = node("div", "actions");
+    const open = node("a", "button", "Open report");
+    open.href = artifactViewUrl(review.report);
+    open.target = "_blank";
+    links.append(open);
+    card.append(links);
+    reviewList.append(card);
+  });
+  shell.append(reviewList);
+  main.replaceChildren(shell);
+}
+
+function manuscriptReviewSettings(options) {
+  const kind = options.reviewKind || "both";
+  const section = node("section", "model-settings writing-settings");
+  section.append(node("h3", "", "Manuscript review"));
+  const grid = node("div", "form-grid");
+  grid.append(field("reviewKind", "Review", {
+    type: "select", value: kind,
+    options: [
+      ["both", "Mathematics and exposition"], ["math", "Mathematics"],
+      ["exposition", "Exposition (manuscript-only reader)"], ["check", "Check the build only (no model)"],
+    ],
+  }));
+  grid.append(field("buildMode", "Build", {
+    type: "select", value: options.buildMode || "latexmk",
+    options: [
+      ["latexmk", "latexmk into a temporary directory"],
+      ["project", "Project build command (below or loose-ends.toml)"],
+      ["none", "No build: use the existing PDF"],
+    ],
+    help: "The reviewers get the files the build read, plus the PDF.",
+  }));
+  grid.append(field("buildCommand", "Build command", {
+    value: options.buildCommand || "", placeholder: "make paper",
+    help: "With the project build: runs next to the entry file. Leave blank to use loose-ends.toml.",
+  }));
+  if (["both", "math"].includes(kind)) {
+    grid.append(field("contextPaths", "Context for the mathematical reviewer", {
+      type: "textarea", value: options.contextPaths || "", full: true,
+      placeholder: "~/problem-commons/pool/papers/own/…/OP-001/attempt-002",
+      help: "Files or directories, one per line: research notes or attempts the reviewer checks the manuscript against. Blank: the manuscript's context from loose-ends.toml; anything here replaces it. The exposition reader never sees them.",
+    }));
+  }
+  if (["both", "exposition"].includes(kind)) {
+    grid.append(field("expositionPrompt", "Reader direction", {
+      type: "textarea", value: options.expositionPrompt || "", full: true,
+    }));
+    grid.append(field("audience", "Audience", {
+      value: options.audience || "", full: true,
+      help: "Intended readers. Default: loose-ends.toml, else researchers in the field who have not read the cited papers.",
+    }));
+    grid.append(field("writingProfile", "Writing profile", {
+      value: options.writingProfile || "", full: true,
+      placeholder: "~/writing/computational-geometry-writing",
+      help: "Writing criteria for the reader. Default: loose-ends.toml. Only its digest is recorded in the repository.",
+    }));
+    grid.append(field("writingProfileExclude", "Leave out of the profile", {
+      type: "textarea", value: Array.isArray(options.writingProfileExclude) ? options.writingProfileExclude.join("\n") : options.writingProfileExclude || "",
+      placeholder: "references/evaluation.md", full: true,
+    }));
+    grid.append(field("expositionAgent", "Reader agent", {
+      type: "select", value: options.expositionAgent || "",
+      options: [["", kind === "both" ? "Inherit the mathematical reviewer's" : "Inherit the agent below"], ["codex", "Codex"], ["claude", "Claude Code (needs Linux/WSL2)"]],
+    }));
+    grid.append(modelField("expositionModel", "Reader model", options.expositionModel, "Inherit"));
+    grid.append(field("expositionReasoningEffort", "Reader reasoning", {
+      type: "select", value: options.expositionReasoningEffort || "",
+      options: [["", "Inherit"], ...["low", "medium", "high", "xhigh", "max", "ultra"].map(value => [value, value])],
+    }));
+    grid.append(field("expositionWebSearch", "Reader web search", {
+      type: "select", value: options.expositionWebSearch || "",
+      options: [["", "Default (Disabled)"], ["disabled", "Disabled"], ["indexed", "Indexed"], ["live", "Live"]],
+    }));
+  }
+  section.append(grid);
+  return section;
 }
 
 function renderActivity({ preserveDetail = false } = {}) {
@@ -4747,6 +5069,7 @@ const actionNames = {
   metadata: "Extract paper metadata",
   analyze: "Analyze papers", triage: "Triage problems", literature: "Search literature",
   solve: "Solve problems", review: "Review attempts", write: "Write paper", revise: "Revise manuscript",
+  "manuscript-review": "Review manuscript",
 };
 
 const taskActionTitles = {
@@ -4759,6 +5082,7 @@ const taskActionTitles = {
   review: "Solution review",
   write: "Paper writing",
   revise: "Manuscript revision",
+  "manuscript-review": "Manuscript review",
 };
 
 function taskActionTitle(action) {
@@ -4917,6 +5241,7 @@ function promptLabel(action) {
     metadata: "Metadata-extractor direction",
     analyze: "Analyzer direction", triage: "Triage direction", literature: "Search direction",
     solve: "Solver direction", review: "Critic direction", write: "Writer direction", revise: "Revision direction",
+    "manuscript-review": "Mathematical-reviewer direction",
   }[action];
 }
 
@@ -4924,10 +5249,11 @@ function dialogStorageKey(action, targets) {
   return `loose-ends-task-draft:${action}:${targets.map(value => value.path).sort().join("|")}`;
 }
 
-function openTask(action, targets) {
+function openTask(action, targets, preset = {}) {
   const storageKey = dialogStorageKey(action, targets);
   let saved = {};
   try { saved = JSON.parse(sessionStorage.getItem(storageKey) || "{}"); } catch (_) { saved = {}; }
+  saved = { ...saved, ...preset };
   if (action === "write" && targets.length > 1 && !saved.writeMode) {
     saved.writeMode = "separate";
   }
@@ -5199,7 +5525,8 @@ function renderTaskConfiguration(errorMessage = "") {
     dialogBody.scrollTop = scrollTop;
     return;
   }
-  grid.append(field("prompt", promptLabel(task.action), {
+  const reviewKind = task.action === "manuscript-review" ? options.reviewKind || "both" : "";
+  if (!["exposition", "check"].includes(reviewKind)) grid.append(field("prompt", promptLabel(task.action), {
     type: "textarea", value: options.prompt || "", full: true,
     help: "Added to the standard task instructions without replacing validation safeguards.",
   }));
@@ -5263,6 +5590,13 @@ function renderTaskConfiguration(errorMessage = "") {
     if (!task.editJob) grid.append(checkbox("refreshResults", "Refresh result selection", "Promote stored selectors to paper scope and use latest attempts.", options.refreshResults));
     grid.append(writingSettings(task, options, draftRecord(task.targets[0]?.path)));
   }
+  if (task.action === "manuscript-review") {
+    grid.append(manuscriptReviewSettings(options));
+    grid.querySelector('[name="reviewKind"]').addEventListener("change", () => {
+      saveDialogOptions();
+      renderTaskConfiguration();
+    });
+  }
   if (!task.editJob) grid.append(field("priorityLevel", "Scheduling weight", {
     type: "select",
     value: options.priorityLevel ?? "0",
@@ -5291,8 +5625,8 @@ function renderTaskConfiguration(errorMessage = "") {
     type: "select", value: options.serviceTier || (options.fast ? "fast" : "standard"),
     options: [["standard", "Standard"], ["fast", "Fast (higher cost)"], ["ultrafast", "Ultrafast (highest cost; requires model/account support)"]],
   }));
-  if (["literature", "solve", "review", "write", "revise"].includes(task.action)) {
-    advancedGrid.append(field("webSearch", "Web search", {
+  if (["literature", "solve", "review", "write", "revise", "manuscript-review"].includes(task.action) && reviewKind !== "exposition") {
+    advancedGrid.append(field("webSearch", task.action === "manuscript-review" ? "Mathematical reviewer web search" : "Web search", {
       type: "select", value: options.webSearch || "",
       options: [["", `Default (${reviewModel.titleize(taskDefaults.webSearch || "unavailable")})`], ["live", "Live"], ["indexed", "Indexed"], ["disabled", "Disabled"]],
     }));
@@ -5318,7 +5652,7 @@ function renderTaskConfiguration(errorMessage = "") {
     help: "Leave blank to inherit the server's CODEX_HOME or default. Dry runs warn if the selected or default home directory is missing. ~ expands to the server's HOME directory.",
   }));
   modelSettings.append(advancedGrid);
-  grid.append(modelSettings);
+  if (reviewKind !== "check") grid.append(modelSettings);
   dialogBody.append(grid);
   grid.querySelectorAll("input, textarea, select").forEach(input => input.addEventListener("input", saveDialogOptions));
   dialogFooter.replaceChildren(
@@ -5651,6 +5985,17 @@ async function fetchJobs({ preserveActivityDetail }) {
   const value = await api("/api/jobs");
   state.jobs = value.jobs;
   updateActivityCount();
+  // A finished manuscript review adds a review to its repository.
+  const signature = state.jobs
+    .filter(job => job.action === "manuscript-review")
+    .map(job => `${job.id}:${job.status}`).join("|");
+  if (signature !== state.paperProjectsSignature) {
+    state.paperProjectsSignature = signature;
+    if (state.paperProjects !== null) {
+      state.paperProjects = null;
+      if (navigationReady && state.tab === "manuscripts") loadPaperProjects();
+    }
+  }
   if (navigationReady && ["research", "papers", "manuscripts"].includes(state.tab)) {
     syncRelatedTasks();
     return;

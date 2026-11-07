@@ -38,12 +38,15 @@ import download_arxiv_author
 import human_review
 import ingest_paper
 import open_problem_common as common
+import review_manuscript
+import source_references
 import review_solutions
 import write_paper
 from workbench_store import ACTIVE_STATUSES, WorkbenchStore
 from workbench_usage import UsageIndex
 from workbench_memory import QUEUE_JOB_ENV, QueueMemoryController
 import workbench_organize
+import workbench_projects
 from workbench_worker import recover_run_artifacts
 from workbench_tasks import (
     PlanError,
@@ -710,12 +713,17 @@ class CatalogManager:
     def __init__(
         self,
         paths: list[Path],
-        manuscripts: Path,
+        manuscripts: Path | Sequence[Path],
         hub: EventHub,
     ):
         self.paths = list(dict.fromkeys(path.resolve() for path in paths))
-        self.manuscripts = manuscripts.resolve()
-        self.manuscripts.mkdir(parents=True, exist_ok=True)
+        # Several projects each keep their own manuscripts; the first root is
+        # the default for tasks that do not belong to a project.
+        roots = [manuscripts] if isinstance(manuscripts, Path) else list(manuscripts)
+        self.manuscript_roots = list(dict.fromkeys(root.resolve() for root in roots))
+        self.manuscripts = self.manuscript_roots[0]
+        for root in self.manuscript_roots:
+            root.mkdir(parents=True, exist_ok=True)
         self.hub = hub
         self.lock = threading.RLock()
         self.version = 0
@@ -738,7 +746,7 @@ class CatalogManager:
         # Adds collections, labels and stars to a snapshot (WorkbenchApplication).
         self.organizer = None
         self.paper_caches: dict[str, dict] = {}
-        self.manuscript_cache: dict | None = None
+        self.manuscript_caches: dict[str, dict] = {}
         self.paper_updates: dict[str, dict] = {}
         self._load_caches()
         self.pending = threading.Event()
@@ -841,6 +849,12 @@ class CatalogManager:
         return papers, reviews
 
     @staticmethod
+    def _merge_manuscripts(entries: Iterable[dict]) -> list[dict]:
+        manuscripts = [item for entry in entries for item in entry.get("manuscripts", [])]
+        manuscripts.sort(key=lambda item: (item["name"].casefold(), item["path"]))
+        return manuscripts
+
+    @staticmethod
     def _catalog_value(
         papers: list[dict],
         reviews: list[dict],
@@ -884,22 +898,19 @@ class CatalogManager:
                 self.paper_caches[self._root_key(root)] = cached
         papers, reviews = self._merge_paper_caches(self.paper_caches.values())
         dependency = self._source_fingerprint(papers, reviews)
-        manuscript_cache = self._load_cache_file(
-            _catalog_cache_path(self.manuscripts, MANUSCRIPT_CACHE_FILENAME),
-            "manuscripts",
-            self.manuscripts,
-        )
-        if (
-            manuscript_cache is not None
-            and manuscript_cache["dependencyFingerprint"] == dependency
-        ):
-            self.manuscript_cache = manuscript_cache
-        cached_anything = bool(self.paper_caches) or self.manuscript_cache is not None
-        manuscripts = (
-            self.manuscript_cache.get("manuscripts", [])
-            if self.manuscript_cache is not None
-            else []
-        )
+        for root in self.manuscript_roots:
+            manuscript_cache = self._load_cache_file(
+                _catalog_cache_path(root, MANUSCRIPT_CACHE_FILENAME),
+                "manuscripts",
+                root,
+            )
+            if (
+                manuscript_cache is not None
+                and manuscript_cache["dependencyFingerprint"] == dependency
+            ):
+                self.manuscript_caches[self._root_key(root)] = manuscript_cache
+        cached_anything = bool(self.paper_caches) or bool(self.manuscript_caches)
+        manuscripts = self._merge_manuscripts(self.manuscript_caches.values())
         self.catalog = self._catalog_value(
             papers,
             reviews,
@@ -1003,54 +1014,55 @@ class CatalogManager:
                     current=current,
                     total=total,
                 )
-            manuscript_key = self._root_key(self.manuscripts)
-            cached_manuscripts = self.manuscript_cache
-            validate_manuscripts = (
-                force
-                or dirty_roots is None
-                or manuscript_key in dirty_roots
-                or cached_manuscripts is None
-                or cached_manuscripts["dependencyFingerprint"] != dependency
-            )
-            if validate_manuscripts:
-                manuscript_signature = _catalog_root_signature(self.manuscripts)
-            else:
-                manuscript_signature = cached_manuscripts["signature"]
-            if (
-                not force
-                and cached_manuscripts is not None
-                and cached_manuscripts["signature"] == manuscript_signature
-                and cached_manuscripts["dependencyFingerprint"] == dependency
-            ):
-                manuscripts = cached_manuscripts["manuscripts"]
-            else:
-                manuscripts = _manuscript_inventory(
-                    self.manuscripts,
-                    papers,
-                    reviews,
-                    progress=manuscript_progress,
+            manuscript_entries: dict[str, dict] = {}
+            for manuscript_root in self.manuscript_roots:
+                manuscript_key = self._root_key(manuscript_root)
+                cached_manuscripts = self.manuscript_caches.get(manuscript_key)
+                validate_manuscripts = (
+                    force
+                    or dirty_roots is None
+                    or manuscript_key in dirty_roots
+                    or cached_manuscripts is None
+                    or cached_manuscripts["dependencyFingerprint"] != dependency
                 )
-                rescanned = True
-                cached_manuscripts = {
-                    "schemaVersion": CATALOG_CACHE_SCHEMA_VERSION,
-                    "kind": "manuscripts",
-                    "root": str(self.manuscripts.resolve()),
-                    "signature": manuscript_signature,
-                    "implementationSignature": _catalog_implementation_signature(),
-                    "dependencyFingerprint": dependency,
-                    "manuscripts": manuscripts,
-                }
-                try:
-                    self._save_cache_file(
-                        _catalog_cache_path(
-                            self.manuscripts,
-                            MANUSCRIPT_CACHE_FILENAME,
+                if validate_manuscripts:
+                    manuscript_signature = _catalog_root_signature(manuscript_root)
+                else:
+                    manuscript_signature = cached_manuscripts["signature"]
+                if not (
+                    not force
+                    and cached_manuscripts is not None
+                    and cached_manuscripts["signature"] == manuscript_signature
+                    and cached_manuscripts["dependencyFingerprint"] == dependency
+                ):
+                    rescanned = True
+                    cached_manuscripts = {
+                        "schemaVersion": CATALOG_CACHE_SCHEMA_VERSION,
+                        "kind": "manuscripts",
+                        "root": str(manuscript_root.resolve()),
+                        "signature": manuscript_signature,
+                        "implementationSignature": _catalog_implementation_signature(),
+                        "dependencyFingerprint": dependency,
+                        "manuscripts": _manuscript_inventory(
+                            manuscript_root,
+                            papers,
+                            reviews,
+                            progress=manuscript_progress,
                         ),
-                        cached_manuscripts,
-                    )
-                except (OSError, UnicodeError):
-                    pass
-            self.manuscript_cache = cached_manuscripts
+                    }
+                    try:
+                        self._save_cache_file(
+                            _catalog_cache_path(
+                                manuscript_root,
+                                MANUSCRIPT_CACHE_FILENAME,
+                            ),
+                            cached_manuscripts,
+                        )
+                    except (OSError, UnicodeError):
+                        pass
+                manuscript_entries[manuscript_key] = cached_manuscripts
+            self.manuscript_caches = manuscript_entries
+            manuscripts = self._merge_manuscripts(manuscript_entries.values())
             self._set_progress("finalizing", "Preparing catalog…")
             value = self._catalog_value(
                 papers,
@@ -1154,7 +1166,7 @@ class CatalogManager:
             if paths is None:
                 self.force_refresh = True
             else:
-                roots = [*self.paths, self.manuscripts]
+                roots = [*self.paths, *self.manuscript_roots]
                 for value in paths:
                     path = Path(value).expanduser().resolve()
                     for root in roots:
@@ -1559,19 +1571,36 @@ class WorkbenchApplication:
         self,
         *,
         paths: list[Path],
-        manuscripts: Path,
+        manuscripts: Path | None,
         state_directory: Path,
         labels: Iterable[Path] = (),
         label_command: Sequence[str] = (),
+        projects: Sequence[workbench_projects.Project] = (),
     ):
+        # Projects add their paper roots, manuscript roots, and labels; the
+        # positional paths and --manuscripts keep working as before.
+        self.projects = list(projects)
+        available = [project for project in self.projects if project.available]
+        paths = list(dict.fromkeys([
+            *paths, *(project.papers for project in available if project.papers),
+        ]))
+        manuscript_roots = list(dict.fromkeys([
+            *([manuscripts] if manuscripts is not None else []),
+            *(project.manuscripts for project in available if project.manuscripts),
+        ])) or [DEFAULT_MANUSCRIPTS.resolve()]
+        manuscripts = manuscript_roots[0]
         self.paths = paths
         self.paper_output_roots = [
             path for path in paths
             if not analyze_papers.is_paper_directory(path)
         ]
         self.manuscripts = manuscripts
+        self.manuscript_roots = manuscript_roots
         self.state_directory = state_directory
-        self.allowed_roots = [*paths, manuscripts]
+        self.allowed_roots = [
+            *paths, *manuscript_roots,
+            *(project.path for project in available if project.path),
+        ]
         self.hub = EventHub()
         self.store = WorkbenchStore(
             state_directory / "workbench.sqlite3",
@@ -1579,7 +1608,7 @@ class WorkbenchApplication:
         )
         self.catalog = CatalogManager(
             paths,
-            manuscripts,
+            manuscript_roots,
             self.hub,
         )
         self.scheduler = Scheduler(
@@ -1599,9 +1628,26 @@ class WorkbenchApplication:
         self.arxiv_search_lock = threading.Lock()
         self.arxiv_pacer = download_arxiv.RequestPacer()
         self.observer = None
-        self.usage = UsageIndex(self.store, paths, manuscripts, self.hub)
+        self.usage = UsageIndex(self.store, paths, manuscript_roots, self.hub)
         self.usage.start()
-        self.labels = workbench_organize.LabelSource(list(labels))
+        # Each project's labels describe only its own paper root, and its label
+        # actions run its own command. Files from --labels keep the
+        # --label-command and apply everywhere, as before.
+        label_paths = [path.expanduser().resolve() for path in labels]
+        scopes: dict[Path, str] = {}
+        self.label_commands: dict[str, list[str]] = {
+            str(path): list(label_command) for path in label_paths if label_command
+        }
+        for project in available:
+            for path in project.labels:
+                label_paths.append(path)
+                if project.papers:
+                    scopes[path] = str(project.papers)
+                if project.label_command:
+                    self.label_commands[str(path)] = list(project.label_command)
+        self.labels = workbench_organize.LabelSource(
+            list(dict.fromkeys(label_paths)), scopes
+        )
         for error in self.labels.errors:
             print(f"warning: {error}", file=sys.stderr)
         self.stars = workbench_organize.StarStore(state_directory)
@@ -1615,14 +1661,75 @@ class WorkbenchApplication:
     def organize(self, value: dict) -> dict:
         return workbench_organize.organize(
             value, self.catalog.paths, self.labels.current(), self.stars.load(),
-            self.labels.current_actions() if self.label_command else (),
+            [
+                action for action in self.labels.current_actions()
+                if self._label_command_for(action)
+            ],
+            self.project_roots(),
         )
+
+    def _label_command_for(self, action: workbench_organize.LabelAction) -> list[str]:
+        return getattr(self, "label_commands", {}).get(action.source) or list(
+            getattr(self, "label_command", []) or []
+        )
+
+    def project_roots(self) -> dict[str, dict]:
+        """Paper, manuscript, and repository roots of each project, for attribution."""
+        roots: dict[str, dict] = {}
+        for project in getattr(self, "projects", []):
+            record = {"name": project.name, "id": project.id, "kind": project.kind}
+            for root in (project.papers, project.manuscripts, project.path):
+                if root is not None:
+                    roots[str(root)] = record
+        return roots
+
+    def repository_for(self, path: Path) -> Path | None:
+        """The folder of the paper project a manuscript belongs to."""
+        project = workbench_projects.project_for(getattr(self, "projects", []), path)
+        return project.path if project and project.kind == "paper" else None
+
+    def manuscripts_for(self, path: Path) -> Path | None:
+        """The manuscripts root of the project a target belongs to."""
+        project = workbench_projects.project_for(getattr(self, "projects", []), path)
+        return project.manuscripts if project and project.manuscripts else None
+
+    def paper_projects(self) -> list[dict]:
+        """Paper repositories with their manuscripts, PDFs and reviews, read now.
+
+        The shared description is read again on every call, so a new
+        loose-ends.toml or manuscript shows without a restart.
+        """
+        values = []
+        for project in getattr(self, "projects", []):
+            if project.kind != "paper":
+                continue
+            record = project.record()
+            record["manuscriptsInRepository"] = []
+            if project.available and project.path is not None:
+                try:
+                    shared = workbench_projects.read_paper_project(project.path)
+                except workbench_projects.ProjectError as exc:
+                    record["error"] = str(exc)
+                    shared = {"manuscripts": project.paper_manuscripts}
+                record["described"] = bool(shared.get("described"))
+                record["reviews"] = shared.get("reviews") or workbench_projects.DEFAULT_REVIEWS
+                record["source"] = source_references.reference(project.path)
+                for manuscript in shared["manuscripts"]:
+                    try:
+                        overview = review_manuscript.manuscript_overview(
+                            project.path, manuscript, shared.get("reviews") or workbench_projects.DEFAULT_REVIEWS
+                        )
+                    except (OSError, UnicodeError) as exc:
+                        overview = {**manuscript.record(), "error": str(exc), "reviews": []}
+                    record["manuscriptsInRepository"].append(overview)
+            values.append(record)
+        return values
 
     def import_targets(self) -> list[Path]:
         return workbench_organize.import_targets(self.paper_output_roots)
 
     def run_label_action(self, request: dict) -> dict:
-        if not self.label_command:
+        if not self.label_command and not getattr(self, "label_commands", None):
             raise PlanError("this workbench was started without --label-command")
         kind, target, key = request.get("kind"), request.get("target"), request.get("key")
         if kind not in workbench_organize.ACTION_KINDS:
@@ -1636,6 +1743,9 @@ class WorkbenchApplication:
         action = self.labels.find_action(key, kind, target)
         if action is None:
             raise PlanError("this action is no longer offered; reload the page")
+        command = self._label_command_for(action)
+        if not command:
+            raise PlanError("this project has no label command")
         try:
             values = workbench_organize.action_values(action, request.get("values"))
         except ValueError as exc:
@@ -1643,7 +1753,7 @@ class WorkbenchApplication:
         with self.label_action_lock:
             try:
                 message = workbench_organize.run_label_command(
-                    self.label_command, action, kind, target, values
+                    command, action, kind, target, values
                 )
             except RuntimeError as exc:
                 raise PlanError(str(exc)) from exc
@@ -1679,7 +1789,7 @@ class WorkbenchApplication:
         observer = Observer()
         handler = ChangeHandler(self.catalog)
         roots: list[Path] = []
-        for candidate in [*self.paths, self.manuscripts]:
+        for candidate in [*self.paths, *self.manuscript_roots]:
             candidate = candidate.resolve()
             if not candidate.exists():
                 candidate.mkdir(parents=True, exist_ok=True)
@@ -1713,6 +1823,8 @@ class WorkbenchApplication:
             manuscripts=self.manuscripts,
             catalog_version=self.catalog.version,
             paper_roots=self.paper_output_roots,
+            manuscripts_for=self.manuscripts_for,
+            repository_for=self.repository_for,
         )
         return self._save_plan(request, plan)
 
@@ -1724,6 +1836,8 @@ class WorkbenchApplication:
             manuscripts=self.manuscripts,
             catalog_version=self.catalog.version,
             paper_roots=self.paper_output_roots,
+            manuscripts_for=self.manuscripts_for,
+            repository_for=self.repository_for,
         )
         return self._save_plan(request, plan)
 
@@ -2122,8 +2236,11 @@ class WorkbenchApplication:
             raise PlanError("problem is required")
         draft = Path(draft_value).expanduser().resolve()
         problem = Path(problem_value).expanduser().resolve()
-        if not _relative_to(draft, self.manuscripts.resolve()):
-            raise PlanError("draft is outside the manuscript directory")
+        if not any(
+            _relative_to(draft, root.resolve())
+            for root in getattr(self, "manuscript_roots", [self.manuscripts])
+        ):
+            raise PlanError("draft is outside the manuscript directories")
         if not any(_relative_to(problem, root.resolve()) for root in self.paths):
             raise PlanError("problem is outside the configured paper directories")
         try:
@@ -2377,7 +2494,12 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                             "paperTargets": [
                                 str(path) for path in self.app.import_targets()
                             ],
-                            "labelCommand": bool(self.app.label_command),
+                            "labelCommand": bool(
+                                self.app.label_command or self.app.label_commands
+                            ),
+                            "projects": [
+                                project.record() for project in self.app.projects
+                            ],
                             "taskDefaults": self.app.task_defaults,
                             "labelErrors": list(self.app.labels.errors),
                         },
@@ -2410,6 +2532,8 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     download=values.get("download", [""])[0] == "1",
                     filename=values.get("name", [""])[0] or None,
                 )
+            elif path == "/api/paper-projects":
+                self.send_json({"projects": self.app.paper_projects()})
             elif path == "/api/manuscript-zip":
                 values = parse_qs(parsed.query)
                 self._send_manuscript_zip(values.get("path", [""])[0])
@@ -2880,9 +3004,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "paths",
-        nargs="+",
+        nargs="*",
         type=Path,
-        help="paper directories or parent directories containing papers",
+        help=(
+            "paper directories or parent directories containing papers "
+            "(optional with --projects)"
+        ),
+    )
+    parser.add_argument(
+        "--projects",
+        type=Path,
+        metavar="FILE",
+        help=(
+            "personal projects file (TOML or JSON): pools, paper roots and paper "
+            "repositories served together, each with its own manuscripts, "
+            "labels and label command; see src/workbench_projects.py"
+        ),
     )
     parser.add_argument(
         "--host",
@@ -2903,7 +3040,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--manuscripts",
         type=Path,
-        default=DEFAULT_MANUSCRIPTS,
+        default=None,
+        help=(
+            f"manuscript directory (default: {DEFAULT_MANUSCRIPTS}, or the "
+            "projects' own manuscript directories)"
+        ),
     )
     parser.add_argument(
         "--state-dir",
@@ -2946,18 +3087,37 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
     paths = [path.expanduser().resolve() for path in args.paths]
-    manuscripts = args.manuscripts.expanduser().resolve()
+    if not paths and not args.projects:
+        parser.error("give paper directories, --projects FILE, or both")
+    try:
+        projects = (
+            workbench_projects.load_projects(args.projects) if args.projects else []
+        )
+    except workbench_projects.ProjectError as exc:
+        return codex_cli.report_error(parser, exc)
+    for project in projects:
+        if not project.available:
+            print(f"warning: project {project.name}: {project.status}", file=sys.stderr)
+    manuscripts = (
+        args.manuscripts.expanduser().resolve()
+        if args.manuscripts is not None
+        else None if projects and not paths
+        else DEFAULT_MANUSCRIPTS
+    )
     state_directory = args.state_dir.expanduser().resolve()
     try:
         app = WorkbenchApplication(
             paths=paths,
             manuscripts=manuscripts,
             state_directory=state_directory,
-            labels=args.labels or workbench_organize.environment_label_paths(),
+            labels=args.labels or (
+                [] if projects else workbench_organize.environment_label_paths()
+            ),
             label_command=(
                 shlex.split(args.label_command, posix=os.name != "nt")
                 if args.label_command else ()
             ),
+            projects=projects,
         )
         app.start_watching()
         server = WorkbenchHTTPServer(

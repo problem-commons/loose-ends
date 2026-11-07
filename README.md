@@ -1129,7 +1129,11 @@ example a skill folder with `SKILL.md` and `references/`. Its text files
 hidden files) are copied once into the manuscript's
 `writing-profiles/<name>-<digest>/`, staged as `inputs/writing-profile/` for the
 writer and the paper critic, and recorded in every draft's `manifest.json`
-with each file's SHA-256 hash. `--writing-profile-exclude PATTERN` (repeatable,
+with each file's SHA-256 hash. If the profile lives in a git checkout, the
+manifest also records where: repository, path and commit (see below). Keeping
+your profiles in one repository, one folder per profile, gives them a history
+and lets every draft and review name the exact version it used.
+`--writing-profile-exclude PATTERN` (repeatable,
 relative to the profile) leaves out background files that are not writing
 instructions, such as notes on evaluating the profile itself. When the profile
 has a `SKILL.md` (or `README.md`), every agent is told to start there and to
@@ -1188,6 +1192,99 @@ draft it revises; `--no-writing-profile` and `--no-exposition-review` switch
 them off, and `--writing-profile` with a changed profile stores and uses a new
 version. Separate editor models and checks for Ipe figure sources are not
 part of this yet.
+
+## Review an existing manuscript
+
+`review_manuscript.py` reviews a LaTeX manuscript that was not written by the
+pipeline, in its own repository and layout: a paper you write with coauthors,
+or a draft from the pool after people edited it.
+
+```sh
+python src/review_manuscript.py ~/papers/spanners/socg/main.tex \
+  --audience "computational geometers (SoCG)" \
+  --writing-profile ~/writing/computational-geometry-writing \
+  --context ~/problem-commons/pool/papers/own/arXiv-.../OP-001/attempt-002
+```
+
+Without `--math` or `--exposition`, both reviews run:
+
+- The mathematical reviewer checks every statement and proof, tries to
+  falsify the main results, and may search the web (`--web-search`, default
+  `live`). It also sees the context: the manuscript's `context` from
+  `loose-ends.toml`, or the `--context` files instead (research notes,
+  attempts), which it treats as evidence to check against, not as truth. Its report has
+  findings `M-001`, ... and a verdict `no_issues_found`,
+  `needs_minor_revision`, `needs_major_revision`, or `incorrect`, and lists
+  every statement as verified, gap, incorrect, or not checked.
+- The exposition reviewer is the manuscript-only reader of `write_paper.py`
+  (findings `X-001`, ...): the manuscript, its PDF and figures, the audience
+  and the writing profile, no context and no web search
+  (`--exposition-web-search`). Its model is set with `--exposition-agent`,
+  `--exposition-model`, ... and defaults to the mathematical reviewer's.
+
+The manuscript is first built with `latexmk -recorder` in a temporary copy of
+the project folder's TeX files and figures, laid out as in the project (so
+`\bibliography{../related-work/references}` and `\include` work), and the
+repository gets no build files; `--build "make paper"` runs
+the project's own build next to the entry file instead, and `--no-build` uses
+the existing PDF (`--pdf FILE`, default the entry as `.pdf`). The reviewers get
+copies of exactly the files the build read inside the repository (sources,
+local packages, bibliography, figures) plus the PDF, not the rest of the
+repository. If the build fails or `latexmk` is missing, the existing PDF is
+used and the manifest says so; without a PDF the reviewers read the sources.
+`--dry-run` builds and lists the files without a review.
+
+Each review lands in its own directory
+`manuscript-reviews/<date>-<manuscript>-<math|exposition>-<agent>-<random>/` (or
+below `reviews = "..."` from `loose-ends.toml`) of the manuscript's project
+folder: the nearest folder with a `loose-ends.toml`,
+else the root of its git checkout, else the entry's folder (`--repository
+DIR` sets it; the workbench passes the paper project's folder). The directory
+holds the report (`math-review.md` or `exposition-review.md`), `review.json`,
+and `manifest.json` with the reviewed version (every file with its SHA-256
+hash, the commit, and which reviewed files had uncommitted changes), the
+build, the model, the writing profile's digest, and the context files. Run
+logs go to `logs/`, which is ignored. Commit the review directories to share
+them; names never collide between machines.
+
+Inputs from elsewhere are recorded without the paths of this machine, as
+repository, path in it, and commit, with whether the file was committed
+unchanged and whether the commit is pushed:
+
+```json
+{"repository": "github.com/problem-commons/pool",
+ "path": "papers/own/arXiv-2412.06316/OP-001/attempt-002",
+ "commit": "3a1fb45…", "committed": true, "pushed": true}
+```
+
+Anyone with access finds the input again with `git show
+3a1fb45:papers/…`; each file's hash confirms it. The script warns when a
+context file or the profile is not committed, not pushed, or not in a checkout
+with a hosted remote; such inputs are identified by their hashes only. The
+writing profile itself is not copied into the repository.
+
+```sh
+python src/review_manuscript.py ~/papers/spanners/socg/main.tex --status
+```
+
+lists the manuscript's reviews and whether each is current or which reviewed
+files changed since. Audience, writing profile, build command and PDF default
+to the manuscript's entry in the repository's `loose-ends.toml` (see
+[Several projects in one workbench](#several-projects-in-one-workbench)). A
+review proposes; it changes nothing in the manuscript.
+
+To see what Loose Ends makes of your folders before a first run:
+
+```sh
+python src/scan_folders.py ~/papers/oriented-spanners ~/math-notes
+python src/scan_folders.py ~/math-notes --toml > ~/math-notes/loose-ends.toml   # then edit
+```
+
+For each folder it reports the git checkout (repository, commit, uncommitted,
+pushed), the manuscripts found or described, their PDFs and reviews, LaTeX
+documents too deep to be found without a `loose-ends.toml`, and other
+material that can be context for a mathematical review, and ends with the
+`papers = [...]` line for the workbench. It changes nothing.
 
 ## Human review
 
@@ -1300,6 +1397,78 @@ After a paper is analyzed, **Add open problem** accepts a title and a
 Markdown/LaTeX statement. Manually entered problems default to `additional`,
 distinguishing them from problems explicitly stated in or inferred from the
 paper, and are included in the normal triage, literature, and solving flows.
+
+### Several projects in one workbench
+
+`--projects FILE` serves several projects at once: pools or other paper roots,
+each with its own manuscripts, labels and label command, and ordinary paper
+repositories. The file is personal (your checkouts on this machine; TOML or
+JSON) and is never shared; relative paths are relative to it:
+
+```toml
+schema_version = 1
+
+[[project]]
+name = "pool"
+kind = "pool"                       # pool | papers | paper
+papers = "~/problem-commons/pool/papers"
+manuscripts = "~/problem-commons/pool/manuscripts"
+labels = ["~/problem-commons/pool/workbench-labels.json"]
+label_command = ["python3", "/home/me/problem-commons/pool/tools/pool.py", "label-action"]
+
+[[project]]
+name = "spanners"
+kind = "paper"
+path = "~/papers/1d-oriented-spanners"
+```
+
+A project's labels apply only below its own paper root (a labels file may also
+say so itself with `"root"`), so two pools may both have `own/arXiv-…/OP-001`;
+its label actions run its own command. A manuscript is written into the
+manuscripts of the project its results come from; results from two projects
+cannot be combined in one manuscript yet. Every paper, problem and manuscript
+shows its project, and a Project filter appears when there is more than one.
+A missing checkout is reported and skipped. Positional paper directories,
+`--manuscripts`, `--labels` and `--label-command` work as before and can be
+combined with `--projects`.
+
+A paper repository may describe itself for everyone who uses it in
+`loose-ends.toml` at its root (shared, so without machine-specific paths):
+
+```toml
+schema_version = 1
+id = "oriented-spanners"
+title = "Oriented spanners"
+writing_profile = "writing/cg"      # optional, repository-relative
+audience = "computational geometers"
+reviews = "reviews"                 # optional; default: manuscript-reviews
+context = ["STATUS.md", "proofs"]   # optional; for the mathematical reviewer
+
+[[manuscript]]
+name = "socg"
+entry = "socg/main.tex"
+build = ["latexmk", "-pdf", "main.tex"]   # optional; run next to the entry
+pdf = "socg/main.pdf"                     # optional; default: the entry as .pdf
+context = ["notes/socg"]                  # optional; instead of the project's
+```
+
+A folder with several projects (one per subfolder, each with its own status
+and reviews) gets one `loose-ends.toml` per project folder; each is then a
+paper project of its own.
+
+Without it, LaTeX files with `\documentclass` up to two levels deep are taken
+as entry points (`socg/main.tex` is named `socg`).
+
+The Manuscripts page lists these manuscripts under **Paper repositories**,
+read from the checkout each time (a new `loose-ends.toml` needs no restart):
+the entry, whether the PDF is older than its sources, and every review in
+`manuscript-reviews/` with verdict, model, commit, and whether the reviewed
+files changed since. **Review mathematics**, **Review exposition**, **Review
+both** and **Check build** queue [`review_manuscript.py`](#review-an-existing-manuscript)
+as an ordinary task, with the context files, audience, writing profile,
+build and models set in its dialog; **Check build** builds and lists the
+files the reviewers would get, without a model. The workbench never edits the
+manuscript; commit the new review directories yourself.
 
 ### Collections, labels and stars
 

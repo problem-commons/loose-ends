@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field, replace
 import fnmatch
 import hashlib
 import json
@@ -21,6 +21,7 @@ import analyze_papers
 import codex_cli
 import open_problem_common as common
 import review_solutions
+import source_references
 from validation import exposition_review as exposition_review_validation
 from validation import paper as paper_validation
 from validation import paper_review as paper_review_validation
@@ -144,6 +145,9 @@ class WritingProfile:
     files: tuple[tuple[str, str, int], ...]  # (relative path, sha256, bytes)
     source: str
     excluded: tuple[str, ...] = ()
+    # Where the profile came from (repository, path, commit), if in a git
+    # checkout: the profile's own history, e.g. a repository of writing styles.
+    origin: dict | None = dataclass_field(default=None, compare=False)
 
     @property
     def entry(self) -> str | None:
@@ -163,6 +167,7 @@ class WritingProfile:
             "source": self.source,
             "excluded": list(self.excluded),
             "copy": self.directory.relative_to(manuscript_directory).as_posix(),
+            "origin": self.origin,
             "files": [
                 {"path": path, "sha256": digest, "bytes": size}
                 for path, digest, size in self.files
@@ -881,6 +886,7 @@ def load_writing_profile(
 ) -> WritingProfile:
     """Store a versioned copy of the profile with the manuscript and return it."""
     name, digest, files, contents = read_writing_profile(source, exclude)
+    origin = source_references.reference(source.expanduser())
     directory = manuscript_directory / WRITING_PROFILE_DIRECTORY / f"{name}-{digest[:12]}"
     if directory.exists():
         stored = stored_writing_profile(
@@ -890,7 +896,7 @@ def load_writing_profile(
              "excluded": list(exclude)},
             manuscript_directory,
         )
-        return stored
+        return replace(stored, origin=origin)
     staging = Path(tempfile.mkdtemp(prefix=".profile-", dir=manuscript_directory))
     try:
         for relative, data in contents:
@@ -906,6 +912,7 @@ def load_writing_profile(
         name, digest, directory, files,
         _stored_manifest_path(source.expanduser().resolve()),
         tuple(exclude),
+        origin,
     )
 
 
@@ -931,6 +938,7 @@ def stored_writing_profile(record: object, manuscript_directory: Path) -> Writin
         record["name"], digest, directory, files,
         str(record.get("source") or ""),
         tuple(item for item in excluded if isinstance(item, str)),
+        record.get("origin") if isinstance(record.get("origin"), dict) else None,
     )
 
 
@@ -1141,6 +1149,12 @@ def stage_exposition_context(
     reader = {
         "audience": audience,
         "manuscript_path": "manuscript",
+        "entry": "manuscript/main.tex",
+        "pdf": "manuscript/main.pdf",
+        "files": sorted(
+            f"manuscript/{path.relative_to(manuscript).as_posix()}"
+            for path in manuscript.rglob("*") if path.is_file()
+        ),
         "writing_profile": None,
     }
     if writing_profile is not None:

@@ -1,0 +1,113 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "no_issues_found",
+        "needs_minor_revision",
+        "needs_major_revision",
+        "incorrect"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "statements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "assessment": {
+            "type": "string",
+            "enum": [
+              "verified",
+              "gap",
+              "incorrect",
+              "not_checked"
+            ]
+          },
+          "explanation": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "location",
+          "assessment",
+          "explanation"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "blocking",
+              "major",
+              "minor"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "proof",
+              "statement",
+              "definition",
+              "computation",
+              "citation",
+              "novelty",
+              "other"
+            ]
+          },
+          "location": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "suggested_repair": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "severity",
+          "category",
+          "location",
+          "explanation",
+          "suggested_repair"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "verdict",
+    "summary",
+    "statements",
+    "findings",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

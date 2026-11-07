@@ -12,7 +12,7 @@ import shlex
 import subprocess
 import sys
 import uuid
-from typing import Iterable
+from typing import Callable, Iterable
 
 import analyze_papers
 import codex_cli
@@ -30,7 +30,10 @@ ACTIONS = {
     "review",
     "write",
     "revise",
+    "manuscript-review",
 }
+MANUSCRIPT_REVIEW_KINDS = ("both", "math", "exposition", "check")
+ACTION_TITLES = {"manuscript-review": "Manuscript review"}
 PROBLEM_RE = analyze_papers.OPEN_PROBLEM_ID_RE
 ATTEMPT_RE = common.ATTEMPT_DIRECTORY_RE
 DRAFT_RE = re.compile(r"^draft-([0-9]{3,})$")
@@ -48,6 +51,7 @@ EDITABLE_TASK_OPTIONS = {
     "writingProfile", "writingProfileExclude", "noWritingProfile", "audience",
     "expositionReview", "expositionAgent", "expositionModel",
     "expositionReasoningEffort", "expositionWebSearch",
+    "expositionPrompt", "contextPaths", "buildMode", "buildCommand", "reviewKind",
 }
 
 
@@ -55,6 +59,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
     """Read workbench-visible defaults from each action's actual CLI parser."""
     import extract_paper_metadata
     import literature_review
+    import review_manuscript
     import review_solutions
     import solve_open_problems
     import triage_open_problems
@@ -69,6 +74,7 @@ def task_cli_defaults() -> dict[str, dict[str, str]]:
         "review": review_solutions,
         "write": write_paper,
         "revise": write_paper,
+        "manuscript-review": review_manuscript,
     }
     defaults: dict[str, dict[str, str]] = {}
     for action, module in modules.items():
@@ -273,7 +279,19 @@ def _problem_exists(path: Path) -> bool:
     )
 
 
+def _latex_entry(path: Path) -> bool:
+    if path.suffix != ".tex" or not path.is_file():
+        return False
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:20000]
+    except OSError:
+        return False
+    return re.search(r"^[^%\n]*\\documentclass", head, re.MULTILINE) is not None
+
+
 def infer_target(path: Path) -> str | None:
+    if _latex_entry(path):
+        return "latex"
     if DRAFT_RE.fullmatch(path.name) and (path / "manifest.json").is_file():
         return "draft"
     if (
@@ -446,8 +464,7 @@ def _review_arguments(argv: list[str], options: dict) -> None:
         argv.extend(("--review-web-search", mode))
 
 
-def _writing_arguments(argv: list[str], options: dict, *, revise: bool) -> None:
-    """Writing profile, audience, and the manuscript-only exposition reviewer."""
+def _profile_arguments(argv: list[str], options: dict) -> str | None:
     profile = _text(options, "writingProfile")
     if profile is not None:
         path = Path(profile).expanduser()
@@ -463,21 +480,10 @@ def _writing_arguments(argv: list[str], options: dict, *, revise: bool) -> None:
         raise PlanError("profile exclusions need a writing profile")
     for pattern in patterns:
         argv.extend(("--writing-profile-exclude", pattern.strip()))
-    if options.get("noWritingProfile") is True:
-        if not revise or profile is not None:
-            raise PlanError("drop the inherited profile only in a revision without a new one")
-        argv.append("--no-writing-profile")
-    if value := _text(options, "audience"):
-        argv.extend(("--audience", value))
-    exposition = options.get("expositionReview")
-    if exposition in (True, "on"):
-        argv.append("--exposition-review")
-    elif exposition == "off":
-        if not revise:
-            raise PlanError("a new manuscript has no exposition review to switch off")
-        argv.append("--no-exposition-review")
-    elif exposition not in (None, False, "", "inherit"):
-        raise PlanError("invalid exposition-review setting")
+    return profile
+
+
+def _exposition_model_arguments(argv: list[str], options: dict) -> None:
     agent = options.get("expositionAgent")
     if agent:
         if agent not in codex_cli.AGENTS:
@@ -495,6 +501,27 @@ def _writing_arguments(argv: list[str], options: dict, *, revise: bool) -> None:
         if mode not in codex_cli.WEB_SEARCH_MODES:
             raise PlanError("invalid exposition-reviewer web-search mode")
         argv.extend(("--exposition-web-search", mode))
+
+
+def _writing_arguments(argv: list[str], options: dict, *, revise: bool) -> None:
+    """Writing profile, audience, and the manuscript-only exposition reviewer."""
+    profile = _profile_arguments(argv, options)
+    if options.get("noWritingProfile") is True:
+        if not revise or profile is not None:
+            raise PlanError("drop the inherited profile only in a revision without a new one")
+        argv.append("--no-writing-profile")
+    if value := _text(options, "audience"):
+        argv.extend(("--audience", value))
+    exposition = options.get("expositionReview")
+    if exposition in (True, "on"):
+        argv.append("--exposition-review")
+    elif exposition == "off":
+        if not revise:
+            raise PlanError("a new manuscript has no exposition review to switch off")
+        argv.append("--no-exposition-review")
+    elif exposition not in (None, False, "", "inherit"):
+        raise PlanError("invalid exposition-review setting")
+    _exposition_model_arguments(argv, options)
 
 
 def _unit(
@@ -560,7 +587,14 @@ def build_plan(
     manuscripts: Path,
     catalog_version: int,
     paper_roots: Iterable[Path] | None = None,
+    manuscripts_for: Callable[[Path], Path | None] | None = None,
+    repository_for: Callable[[Path], Path | None] | None = None,
 ) -> dict:
+    """Plan a task; `manuscripts_for` maps a target to its project's manuscripts.
+
+    A manuscript task writes into exactly one project: its targets must all
+    belong to the same project (or to none, which uses `manuscripts`).
+    """
     if not isinstance(request, dict):
         raise PlanError("invalid task request")
     action = request.get("action")
@@ -836,6 +870,17 @@ def build_plan(
 
     elif action == "write":
         _require(targets, {"paper", "problem", "attempt"}, action)
+        if manuscripts_for is not None:
+            destinations = {
+                (manuscripts_for(Path(target["path"])) or manuscripts).resolve()
+                for target in targets
+            }
+            if len(destinations) > 1:
+                raise PlanError(
+                    "a manuscript is written into one project; choose results "
+                    "from one project, or write one manuscript per project"
+                )
+            manuscripts = destinations.pop()
         argv = [
             python,
             "-u",
@@ -910,9 +955,65 @@ def build_plan(
             )
         )
 
+    elif action == "manuscript-review":
+        _require(targets, {"latex"}, action)
+        kind = _choice(options, "reviewKind", MANUSCRIPT_REVIEW_KINDS, "both")
+        context = options.get("contextPaths") or []
+        if isinstance(context, str):
+            context = [line.strip() for line in context.splitlines() if line.strip()]
+        if not isinstance(context, list) or not all(isinstance(item, str) for item in context):
+            raise PlanError("context paths must be given one per line")
+        build_mode = _choice(options, "buildMode", ("latexmk", "project", "none"), "latexmk")
+        for target in targets:
+            entry = Path(target["path"])
+            argv = [python, "-u", str(script / "review_manuscript.py"), str(entry)]
+            # A paper project's reviews go to its folder, also without git.
+            if repository_for is not None and (folder := repository_for(entry)) is not None:
+                argv.extend(("--repository", str(folder)))
+            if kind == "check":
+                argv.append("--dry-run")
+            elif kind != "both":
+                argv.append(f"--{kind}")
+            if build_mode == "none":
+                argv.append("--no-build")
+            elif build_mode == "project" and (command := _text(options, "buildCommand")):
+                argv.extend(("--build", command))
+            if kind in ("both", "math"):
+                if value := _text(options, "prompt"):
+                    argv.extend(("--math-prompt", value))
+                for item in context:
+                    path = Path(item).expanduser()
+                    if not path.exists():
+                        raise PlanError(f"context not found: {path}")
+                    argv.extend(("--context", str(path.resolve())))
+            if kind in ("both", "exposition"):
+                if value := _text(options, "expositionPrompt"):
+                    argv.extend(("--exposition-prompt", value))
+                _profile_arguments(argv, options)
+                if value := _text(options, "audience"):
+                    argv.extend(("--audience", value))
+            if kind != "check":
+                _common_arguments(argv, options, prompt=False, web_search=True)
+                _exposition_model_arguments(argv, options)
+            label = {
+                "both": "Review mathematics and exposition of",
+                "math": "Review mathematics of",
+                "exposition": "Review exposition of",
+                "check": "Check the build of",
+            }[kind]
+            units.append(
+                _unit(
+                    label=f"{label} {target['label']}",
+                    argv=argv,
+                    project_root=project_root,
+                    targets=[target],
+                    additional_resources=(f"latex:{entry}",),
+                )
+            )
+
     prompts = {
         key: value
-        for key in ("prompt", "reviewPrompt")
+        for key in ("prompt", "reviewPrompt", "expositionPrompt")
         if (value := _text(options, key)) is not None
     }
     single_paper_title = _single_paper_problem_title(targets)
@@ -927,7 +1028,7 @@ def build_plan(
     return {
         "id": str(uuid.uuid4()),
         "action": action,
-        "title": f"{action.title()}: {scope_title}",
+        "title": f"{ACTION_TITLES.get(action, action.title())}: {scope_title}",
         "singlePaperTitle": single_paper_title,
         "catalogVersion": catalog_version,
         "priorityLevel": priority_level,
