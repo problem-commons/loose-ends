@@ -4,8 +4,8 @@
     python src/scan_folders.py ~/papers/oriented-spanners ~/math-notes ...
     python src/scan_folders.py ~/math-notes --toml     # a loose-ends.toml to start from
 
-For every folder: whether it is a git checkout (repository, commit, pushed,
-uncommitted changes), its loose-ends.toml or the LaTeX manuscripts found in
+For every folder: whether it is a git checkout (repository, commit, pushed),
+its loose-ends.toml or the LaTeX manuscripts found in
 it, their PDFs and reviews, LaTeX documents too deep to be found
 automatically, and other material (Markdown, PDFs, code) that can serve as
 context for a mathematical review. Nothing is changed.
@@ -64,7 +64,7 @@ def scan(folder: Path) -> dict:
     report: dict = {"folder": folder, "exists": folder.is_dir()}
     if not folder.is_dir():
         return report
-    report["source"] = source_references.reference(folder)
+    report["source"] = source_references.reference(folder, status=False)
     report["checkout"] = source_references.checkout_root(folder)
     try:
         shared = projects.read_paper_project(folder)

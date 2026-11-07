@@ -43,6 +43,7 @@ const state = {
   paperProjects: null,
   paperProjectsLoad: null,
   paperProjectsSignature: "",
+  paperProjectsFresh: false,
   manuscriptDraftSelections: new Map(),
   selectedJob: "",
   detailTab: "attempt",
@@ -3702,9 +3703,11 @@ function paperProjectsConfigured() {
   return (state.settings.projects || []).some(project => project.kind === "paper");
 }
 
-function loadPaperProjects() {
+function loadPaperProjects({ fresh = false } = {}) {
   if (state.paperProjectsLoad) return state.paperProjectsLoad;
-  state.paperProjectsLoad = api("/api/paper-projects")
+  fresh ||= state.paperProjectsFresh;
+  state.paperProjectsFresh = false;
+  state.paperProjectsLoad = api(`/api/paper-projects${fresh ? "?fresh=1" : ""}`)
     .then(value => {
       state.paperProjects = value.projects || [];
     })
@@ -3799,7 +3802,7 @@ function renderRepositoryManuscript(item) {
     open.target = "_blank";
     actions.append(open);
   }
-  actions.append(button("Refresh", () => { state.paperProjects = null; loadPaperProjects(); }));
+  actions.append(button("Refresh", () => { state.paperProjects = null; loadPaperProjects({ fresh: true }); }));
   shell.append(actions);
 
   const facts = node("section", "panel");
@@ -5993,6 +5996,7 @@ async function fetchJobs({ preserveActivityDetail }) {
     state.paperProjectsSignature = signature;
     if (state.paperProjects !== null) {
       state.paperProjects = null;
+      state.paperProjectsFresh = true;
       if (navigationReady && state.tab === "manuscripts") loadPaperProjects();
     }
   }

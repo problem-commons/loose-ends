@@ -129,7 +129,7 @@ def git_state(repository: Path, files: Sequence[Path]) -> dict:
     if checkout is None or checkout.commit is None:
         return {"git": False, "repository": None, "path": None, "commit": None,
                 "pushed": None, "uncommitted": []}
-    changed = source_references.changed_paths(checkout, repository) or set()
+    blobs = source_references.committed_blobs(checkout, repository) or {}
     return {
         "git": True,
         "repository": checkout.repository,
@@ -138,7 +138,7 @@ def git_state(repository: Path, files: Sequence[Path]) -> dict:
         "pushed": checkout.pushed,
         "uncommitted": sorted(
             path.relative_to(repository).as_posix() for path in files
-            if source_references.is_changed(checkout.relative(path), changed)
+            if not source_references.is_committed(checkout, path, blobs)
         ),
     }
 
