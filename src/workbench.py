@@ -70,6 +70,8 @@ ASSET_DIRECTORY = Path(__file__).resolve().parent / "workbench_web"
 DEFAULT_STATE_DIRECTORY = PROJECT_ROOT / ".loose-ends"
 SCHEDULER_ERROR_RETRY_SECONDS = 5.0
 DEFAULT_MANUSCRIPTS = PROJECT_ROOT / "manuscripts"
+# Paper repositories are read again after this many seconds (or on request).
+PAPER_PROJECTS_MAX_AGE = 30.0
 IGNORED_PARTS = {".git", ".loose-ends", "__pycache__", ".runs", ".extra-history"}
 LABEL_POLL_SECONDS = 2.0
 IGNORED_PREFIXES = (
@@ -1654,6 +1656,8 @@ class WorkbenchApplication:
         # Runs the label actions declared in the labels files (--label-command).
         self.label_command = list(label_command)
         self.label_action_lock = threading.Lock()
+        self.paper_projects_lock = threading.Lock()
+        self.paper_projects_cache: tuple[float, list[dict] | None] = (0.0, None)
         self.catalog.organizer = self.organize
         self.closing = threading.Event()
         self.label_thread: threading.Thread | None = None
@@ -1693,13 +1697,27 @@ class WorkbenchApplication:
         project = workbench_projects.project_for(getattr(self, "projects", []), path)
         return project.manuscripts if project and project.manuscripts else None
 
-    def paper_projects(self) -> list[dict]:
-        """Paper repositories with their manuscripts, PDFs and reviews, read now.
+    def paper_projects(self, max_age: float = PAPER_PROJECTS_MAX_AGE) -> list[dict]:
+        """Paper repositories with their manuscripts, PDFs and reviews.
 
-        The shared description is read again on every call, so a new
-        loose-ends.toml or manuscript shows without a restart.
+        Read again when older than `max_age` seconds, so a new loose-ends.toml
+        or review shows without a restart. One reading at a time: on a
+        Windows drive seen from WSL a reading takes a while, and concurrent
+        requests would only slow each other down.
         """
+        lock = getattr(self, "paper_projects_lock", None)
+        if lock is None:
+            return self._read_paper_projects()
+        with lock:
+            stamp, value = self.paper_projects_cache
+            if value is None or time.monotonic() - stamp > max_age:
+                value = self._read_paper_projects()
+                self.paper_projects_cache = (time.monotonic(), value)
+            return value
+
+    def _read_paper_projects(self) -> list[dict]:
         values = []
+        checkouts: dict = {}
         for project in getattr(self, "projects", []):
             if project.kind != "paper":
                 continue
@@ -1713,7 +1731,10 @@ class WorkbenchApplication:
                     shared = {"manuscripts": project.paper_manuscripts}
                 record["described"] = bool(shared.get("described"))
                 record["reviews"] = shared.get("reviews") or workbench_projects.DEFAULT_REVIEWS
-                record["source"] = source_references.reference(project.path)
+                # No status: it would read the whole folder (slow from WSL on C:).
+                record["source"] = source_references.reference(
+                    project.path, status=False, cache=checkouts
+                )
                 for manuscript in shared["manuscripts"]:
                     try:
                         overview = review_manuscript.manuscript_overview(
@@ -2533,7 +2554,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                     filename=values.get("name", [""])[0] or None,
                 )
             elif path == "/api/paper-projects":
-                self.send_json({"projects": self.app.paper_projects()})
+                fresh = parse_qs(parsed.query).get("fresh", [""])[0] == "1"
+                self.send_json({"projects": self.app.paper_projects(
+                    max_age=0.0 if fresh else PAPER_PROJECTS_MAX_AGE
+                )})
             elif path == "/api/manuscript-zip":
                 values = parse_qs(parsed.query)
                 self._send_manuscript_zip(values.get("path", [""])[0])

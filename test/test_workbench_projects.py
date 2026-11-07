@@ -255,6 +255,8 @@ pdf = "journal/build/paper.pdf"
         (review / "math-review.md").write_text("# Review\n\nM-001\n", encoding="utf-8")
 
         spanners, gone = app.paper_projects()
+        self.assertIs(app.paper_projects()[0], spanners)  # cached
+        self.assertIsNot(app.paper_projects(max_age=0)[0], spanners)  # read again
         self.assertEqual((spanners["name"], gone["status"]), ("spanners", "missing"))
         self.assertIsNone(spanners["source"]["commit"])  # not a git checkout
         [manuscript] = spanners["manuscriptsInRepository"]

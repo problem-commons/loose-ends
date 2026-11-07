@@ -408,6 +408,14 @@ class ReviewManuscriptTests(unittest.TestCase):
         later = source_references.reference(attempt / "draft.md")
         self.assertEqual((later["committed"], later["pushed"]), (True, False))
         self.assertIn("not pushed", " ".join(source_references.warnings("x", later)))
+        # Windows line ends in the checkout still match the commit.
+        (attempt / "solution.md").write_bytes((attempt / "solution.md").read_bytes().replace(b"\n", b"\r\n"))
+        self.assertTrue(source_references.reference(attempt / "solution.md")["committed"])
+        # A deleted committed file makes its folder uncommitted.
+        (attempt / "draft.md").unlink()
+        self.assertFalse(source_references.reference(attempt)["committed"])
+        quick = source_references.reference(pool, status=False)
+        self.assertEqual((quick["committed"], quick["repository"]), (None, "github.com/problem-commons/pool"))
 
     def test_project_folders_inside_and_outside_checkouts(self):
         # A notes folder with its own loose-ends.toml inside a larger checkout.
