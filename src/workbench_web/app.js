@@ -44,6 +44,8 @@ const state = {
   paperProjectsLoad: null,
   paperProjectsSignature: "",
   paperProjectsFresh: false,
+  // Open or folded paper-repository groups in the Manuscripts sidebar, by project path.
+  repositoryGroupsOpen: null,
   manuscriptDraftSelections: new Map(),
   selectedJob: "",
   detailTab: "attempt",
@@ -100,6 +102,9 @@ const viewPaths = Object.freeze({
   activity: "/activity",
 });
 const tabUrlStoragePrefix = "loose-ends-workbench:tab-url:";
+const repositoryGroupsStorageKey = "loose-ends-workbench:repository-groups";
+// Projects with more manuscripts than this start folded in the Manuscripts sidebar.
+const REPOSITORY_GROUP_FOLD = 6;
 const initialPriorities = [...reviewModel.priorityLevels];
 const pageScrollPositions = new Map();
 const sidebarControlNodes = new Map();
@@ -3488,26 +3493,12 @@ function renderManuscripts() {
   });
   manuscriptScroll.append(node("div", "sidebar-heading", `${manuscripts.length} manuscripts`), list);
   if (paperProjectsConfigured()) {
-    const repositoryList = node("div", "side-list");
-    repositoryItems.forEach(value => {
-      const outdated = value.manuscript.reviews.filter(review => !review.current).length;
-      appendSideCard(repositoryList, {
-        title: `${value.project.title || value.project.name} · ${value.manuscript.name}`,
-        meta: [
-          value.manuscript.entry,
-          value.manuscript.pdfState === "missing" ? "no PDF" : `PDF ${value.manuscript.pdfState}`,
-          `${value.manuscript.reviews.length} review${value.manuscript.reviews.length === 1 ? "" : "s"}${outdated ? ` (${outdated} outdated)` : ""}`,
-        ].join(" · "),
-        active: state.selectedManuscript === value.key,
-        onClick: () => {
-          state.selectedManuscript = value.key;
-          syncNavigation();
-        },
-      });
-    });
+    const repositoryList = node("div", "repository-groups");
+    const groups = repositoryGroups(repositoryItems);
+    groups.forEach(group => repositoryList.append(renderRepositoryGroup(group)));
     const heading = state.paperProjects === null
       ? "Paper repositories · loading…"
-      : `Paper repositories · ${repositoryItems.length} manuscript${repositoryItems.length === 1 ? "" : "s"}`;
+      : `Paper repositories · ${groups.length} project${groups.length === 1 ? "" : "s"} · ${repositoryItems.length} manuscript${repositoryItems.length === 1 ? "" : "s"}`;
     manuscriptScroll.append(node("div", "sidebar-heading", heading), repositoryList);
     paperProjectProblems().forEach(message => manuscriptScroll.append(node("small", "sidebar-note", message)));
     if (state.paperProjects === null) loadPaperProjects();
@@ -3738,6 +3729,89 @@ function filteredRepositoryManuscripts() {
     !needle || [value.project.name, value.project.title, value.manuscript.name, value.manuscript.entry]
       .join(" ").toLowerCase().includes(needle)
   );
+}
+
+function repositoryGroups(items) {
+  const groups = new Map();
+  items.forEach(item => {
+    const key = item.project.path || item.project.name;
+    if (!groups.has(key)) groups.set(key, { key, project: item.project, items: [] });
+    groups.get(key).items.push(item);
+  });
+  return [...groups.values()];
+}
+
+function repositoryGroupState() {
+  if (!state.repositoryGroupsOpen) {
+    let stored = {};
+    try {
+      stored = JSON.parse(localStorage.getItem(repositoryGroupsStorageKey) || "{}");
+    } catch (_) {
+      stored = {};
+    }
+    state.repositoryGroupsOpen = stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  }
+  return state.repositoryGroupsOpen;
+}
+
+function rememberRepositoryGroup(key, open) {
+  repositoryGroupState()[key] = open;
+  try {
+    localStorage.setItem(repositoryGroupsStorageKey, JSON.stringify(state.repositoryGroupsOpen));
+  } catch (_) {
+    // The fold state is a convenience; without storage it lasts for this page.
+  }
+}
+
+// A search opens every group; otherwise the reader's own choice counts, then
+// the selection, and large projects start folded.
+function repositoryGroupOpen(group, selected) {
+  if ((state.search || "").trim()) return true;
+  const remembered = repositoryGroupState()[group.key];
+  if (typeof remembered === "boolean") return remembered;
+  return selected || group.items.length <= REPOSITORY_GROUP_FOLD;
+}
+
+function renderRepositoryGroup(group) {
+  const selected = group.items.some(item => item.key === state.selectedManuscript);
+  // Following a link to a manuscript opens its group even if it was folded.
+  if (selected && state.revealSidebarSelection && repositoryGroupState()[group.key] === false) {
+    rememberRepositoryGroup(group.key, true);
+  }
+  const open = repositoryGroupOpen(group, selected);
+  const details = node("details", "repository-group");
+  details.open = open;
+  let current = open;
+  details.addEventListener("toggle", () => {
+    if (details.open === current) return;
+    current = details.open;
+    rememberRepositoryGroup(group.key, current);
+  });
+  const label = group.project.title || group.project.name;
+  const summary = node("summary", "sidebar-heading paper-heading");
+  const title = node("span", "paper-heading-title", label);
+  title.title = group.project.path ? `${label}\n${group.project.path}` : label;
+  summary.append(title, node("span", "repository-group-count", String(group.items.length)));
+  details.append(summary);
+  const list = node("div", "side-list");
+  group.items.forEach(value => {
+    const outdated = value.manuscript.reviews.filter(review => !review.current).length;
+    appendSideCard(list, {
+      title: value.manuscript.name,
+      meta: [
+        value.manuscript.entry,
+        value.manuscript.pdfState === "missing" ? "no PDF" : `PDF ${value.manuscript.pdfState}`,
+        `${value.manuscript.reviews.length} review${value.manuscript.reviews.length === 1 ? "" : "s"}${outdated ? ` (${outdated} outdated)` : ""}`,
+      ].join(" · "),
+      active: state.selectedManuscript === value.key,
+      onClick: () => {
+        state.selectedManuscript = value.key;
+        syncNavigation();
+      },
+    });
+  });
+  details.append(list);
+  return details;
 }
 
 function paperProjectProblems() {
