@@ -165,6 +165,13 @@ button { color: inherit; }
 .problem-scroll, .paper-scroll, .manuscript-scroll, .activity-scroll { flex: 1 1 auto; min-height: 100px; overflow: auto; margin-top: 4px; padding-right: 2px; scrollbar-gutter: stable; }
 .paper-heading { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin-top: 9px; color: var(--accent); letter-spacing: .04em; text-transform: none; }
 .paper-heading-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repository-group > summary { justify-content: flex-start; list-style: none; cursor: pointer; }
+.repository-group > summary::-webkit-details-marker { display: none; }
+.repository-group > summary::before { content: "\25B8"; flex: none; width: 9px; color: var(--muted); }
+.repository-group[open] > summary::before { content: "\25BE"; }
+.repository-group > summary .paper-heading-title { flex: 1; }
+.repository-group > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.repository-group-count { flex: none; color: var(--muted); font-weight: 700; letter-spacing: 0; }
 .attempt-switcher, .draft-switcher { flex: none; max-height: 155px; overflow: hidden; margin-top: 5px; padding-top: 2px; border-top: 1px solid var(--line); }
 .attempt-switcher > .sidebar-heading, .draft-switcher > .sidebar-heading { margin-top: 3px; }
 .attempt-list, .draft-list { display: grid; gap: 2px; max-height: 125px; overflow: auto; padding-right: 2px; scrollbar-gutter: stable; }

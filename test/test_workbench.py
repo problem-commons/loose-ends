@@ -240,6 +240,18 @@ class WorkbenchPlanningTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_sidebar_selection_suite(self):
+        result = subprocess.run(
+            ["node", "--test", "test_workbench_selection.cjs"],
+            cwd=PROJECT_ROOT / "test",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_catalog_change_does_not_invalidate_a_confirmed_plan(self):
         app = object.__new__(workbench.WorkbenchApplication)
         app.plan_lock = threading.Lock()

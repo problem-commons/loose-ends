@@ -17,6 +17,9 @@ const functions = [
   "olderVersionWarning", "olderAttemptWarning", "openRoute",
   "organizeFilterNodes", "organizeFilters", "syncOrganizeFilters", "hiddenNote",
   "organizeTagsNode", "labelBadges", "starButton",
+  "repositoryManuscripts", "filteredRepositoryManuscripts", "paperProjectProblems",
+  "repositoryGroups", "repositoryGroupState", "rememberRepositoryGroup", "repositoryGroupOpen",
+  "renderRepositoryGroup",
 ].map(name => source.match(new RegExp(`^function ${name}[(][^]*?^}`, "m"))[0]).join("\n");
 
 test("nearest matching selection keeps matches, measures distance, and prefers following ties", () => {
@@ -103,6 +106,8 @@ function harness(view, sort = "alphabetical") {
     humanize: reviewModel.humanize,
     appendSideCard: (_list, card) => cards.push(card),
     sidebar: node("aside"), main: { replaceChildren() {}, querySelector() {} }, renderReviewDetail() {}, loadReviewDetail() {},
+    paperProjectsConfigured: () => Boolean(state.paperProjects), loadPaperProjects() {},
+    renderRepositoryManuscript() {}, REPOSITORY_GROUP_FOLD: 6,
     taskSidebarTitle: job => job.title, taskSidebarMeta() {}, taskBadges() {},
     syncNavigation: options => {
       assert.equal(options.replace, true);
@@ -245,6 +250,65 @@ test("Activity: search selects the nearest task and highlights it immediately", 
   assert.equal(h.state.selectedJob, "d");
   h.search("no such task");
   assert.equal(h.state.selectedJob, "");
+});
+
+test("Manuscripts: paper repositories are grouped by project and large projects start folded", () => {
+  const h = harness("Manuscripts");
+  const project = (name, count) => ({
+    name, title: `${name} title`, path: `/papers/${name}`, status: "ok",
+    manuscriptsInRepository: Array.from({ length: count }, (_, index) => ({
+      name: `${name}-${index}`, entry: `${name}-${index}/main.tex`,
+      entryPath: `/papers/${name}/${name}-${index}/main.tex`, pdfState: "current", reviews: [],
+    })),
+  });
+  h.state.paperProjects = [project("small", 2), project("notes", 8)];
+  const groups = () => {
+    const found = [];
+    const walk = element => {
+      if (element?.tag === "details") found.push(element);
+      (element?.children || []).forEach(walk);
+    };
+    walk(h.context.sidebar);
+    return found.slice(-2);
+  };
+  const titles = details => details.children[0].children[0].text;
+  h.render();
+  let [small, notes] = groups();
+  assert.equal(titles(small), "small title");
+  assert.equal(small.open, true);
+  assert.equal(notes.open, false, "a project with many manuscripts starts folded");
+  assert.ok(h.cards.some(card => card.title === "notes-3"), "cards show the manuscript name only");
+
+  h.context.sidebar.children.length = 0;
+  h.state.selectedManuscript = "repo:/papers/notes/notes-3/main.tex";
+  h.render();
+  [, notes] = groups();
+  assert.equal(notes.open, true, "the group of the selected manuscript is open");
+
+  notes.open = false;
+  notes.handlers.toggle();
+  h.context.sidebar.children.length = 0;
+  h.render();
+  [, notes] = groups();
+  assert.equal(notes.open, false, "folding is remembered even with a selection inside");
+
+  h.state.revealSidebarSelection = true;
+  h.context.sidebar.children.length = 0;
+  h.render();
+  [, notes] = groups();
+  assert.equal(notes.open, true, "following a link opens the folded group");
+
+  h.state.selectedManuscript = "c";
+  notes.open = false;
+  notes.handlers.toggle();
+  h.state.search = "small";
+  h.context.sidebar.children.length = 0;
+  h.render();
+  assert.equal(groups().length, 1, "search keeps only matching projects");
+  h.state.search = "notes-5";
+  h.context.sidebar.children.length = 0;
+  h.render();
+  assert.equal(groups().at(-1).open, true, "a search opens folded groups");
 });
 
 test("Manuscripts: keep the selected draft when matching and restore the next manuscript's remembered draft", () => {
