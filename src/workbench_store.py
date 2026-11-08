@@ -44,12 +44,18 @@ def _resource_identity(resource: str) -> tuple[str, str]:
     return kind, path
 
 
+# Resources that only name where a run may write, without locking it.
+SHARED_RESOURCE_KINDS = {"repository"}
+
+
 def _resources_conflict(left: Iterable[str], right: Iterable[str]) -> bool:
     """Whether two sets overlap, including paper/child-problem locks."""
     left_identities = [_resource_identity(resource) for resource in left]
     right_identities = [_resource_identity(resource) for resource in right]
     for left_kind, left_path in left_identities:
         for right_kind, right_path in right_identities:
+            if left_kind in SHARED_RESOURCE_KINDS or right_kind in SHARED_RESOURCE_KINDS:
+                continue
             if left_kind == right_kind and left_path == right_path:
                 return True
             if left_kind == "paper" and right_kind == "problem":

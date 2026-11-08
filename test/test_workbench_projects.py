@@ -293,6 +293,17 @@ pdf = "journal/build/paper.pdf"
         self.assertIn("--exposition-agent", unit["argv"])
         self.assertEqual(plan["title"], "Manuscript review: main.tex")
         self.assertIn(f"latex:{entry}", unit["resources"])
+        self.assertIn(f"repository:{self.repository}", unit["resources"])
+        # The project folder does not lock: two manuscripts review in parallel,
+        # and the worker accepts the review directories below it.
+        import workbench_store
+        import workbench_worker
+        self.assertFalse(workbench_store._resources_conflict(
+            [f"latex:{entry}", f"repository:{self.repository}"],
+            [f"latex:{entry.with_name('other.tex')}", f"repository:{self.repository}"],
+        ))
+        self.assertTrue(workbench_store._resources_conflict([f"latex:{entry}"], [f"latex:{entry}"]))
+        self.assertIn(self.repository, workbench_worker._artifact_roots({"resources": unit["resources"]}))
         with self.assertRaisesRegex(PlanError, "not a recognized"):
             app.create_plan({"action": "manuscript-review",
                              "targets": [{"path": str(self.repository / "socg" / "missing.tex")}]})

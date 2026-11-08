@@ -18,6 +18,7 @@ import analyze_papers
 import codex_cli
 import download_arxiv
 import open_problem_common as common
+import source_references
 
 
 ACTIONS = {
@@ -968,7 +969,8 @@ def build_plan(
             entry = Path(target["path"])
             argv = [python, "-u", str(script / "review_manuscript.py"), str(entry)]
             # A paper project's reviews go to its folder, also without git.
-            if repository_for is not None and (folder := repository_for(entry)) is not None:
+            folder = repository_for(entry) if repository_for is not None else None
+            if folder is not None:
                 argv.extend(("--repository", str(folder)))
             if kind == "check":
                 argv.append("--dry-run")
@@ -1007,7 +1009,12 @@ def build_plan(
                     argv=argv,
                     project_root=project_root,
                     targets=[target],
-                    additional_resources=(f"latex:{entry}",),
+                    # The review directories it reports are accepted below
+                    # the project folder (a shared, non-exclusive resource).
+                    additional_resources=(
+                        f"latex:{entry}",
+                        f"repository:{folder or source_references.checkout_root(entry) or entry.parent}",
+                    ),
                 )
             )
 

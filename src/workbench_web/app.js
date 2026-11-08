@@ -3862,7 +3862,7 @@ function renderRepositoryManuscript(item) {
   reviewsHeading.append(node("h2", "", `Reviews · ${manuscript.reviews.length}`));
   shell.append(reviewsHeading);
   if (!manuscript.reviews.length) {
-    shell.append(node("p", "help", "No reviews yet. Reviews are stored in manuscript-reviews/ in the repository; commit them to share them."));
+    shell.append(node("p", "help", `No reviews yet. Reviews are stored in ${project.reviews || "manuscript-reviews"}/ in the project folder; commit them to share them.`));
   }
   const reviewList = node("div", "repository-reviews");
   [...manuscript.reviews].reverse().forEach(review => {
