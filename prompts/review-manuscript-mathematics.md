@@ -41,7 +41,10 @@ assessment, then the statements one by one (with the manuscript's label or
 number: verified, gap, incorrect, or not checked, and why), then the findings
 with stable IDs `M-001`, `M-002`, ... matching the structured response, each
 with its location, the problem, and a concrete repair or what a repair would
-need. Do not edit the manuscript or the staged inputs.
+need. Give locations as the authors see them: section, statement label, page
+of the PDF, and file and line relative to the manuscript directory (for
+example `part2.tex:64`), never the staging paths. Do not edit the manuscript
+or the staged inputs.
 
 Severity: `blocking` when a main result is false or unproved; `major` when a
 substantial argument has a gap that needs real work; `minor` for local
