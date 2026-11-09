@@ -378,6 +378,28 @@ class ReviewManuscriptTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("context not found", output)
 
+    def test_writing_profile_precedence(self):
+        default = self.root / "personal"
+        default.mkdir()
+        (default / "SKILL.md").write_text("# Personal\n", encoding="utf-8")
+        code, output = self.run_main("--no-build", "--dry-run", "--default-writing-profile", str(default),
+                                     "--default-writing-profile-exclude", "agents/*")
+        self.assertEqual(code, 0, output)
+        self.assertIn(f"writing profile: {default}", output)
+        self.assertIn("(leaving out agents/*)", output)
+        # The project's loose-ends.toml outranks the personal default.
+        (self.repository / "loose-ends.toml").write_text(
+            'schema_version = 1\nwriting_profile = "writing/cg"\n', encoding="utf-8")
+        code, output = self.run_main("--no-build", "--dry-run", "--default-writing-profile", str(default))
+        self.assertIn("writing/cg", output)
+        self.assertNotIn(str(default), output)
+        code, output = self.run_main("--no-build", "--dry-run", "--no-writing-profile")
+        self.assertNotIn("writing profile:", output)
+        code, output = self.run_main("--no-build", "--dry-run", "--no-writing-profile",
+                                     "--writing-profile", str(default))
+        self.assertEqual(code, 1)
+        self.assertIn("exclude each other", output)
+
     # -- references and project folders ------------------------------------------
 
     def test_references_name_repository_path_and_commit(self):

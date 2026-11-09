@@ -24,7 +24,10 @@ it reviewed have changed since.
   writing profile; no context files and, by default, no web search.
 
 Without --math or --exposition, both run. Settings missing on the command line
-come from the repository's loose-ends.toml (see workbench_projects.py).
+come from the repository's loose-ends.toml (see workbench_projects.py). The
+writing profile is --writing-profile, else the one loose-ends.toml names, else
+--default-writing-profile (the workbench passes your personal default);
+--no-writing-profile reviews without one.
 """
 
 from __future__ import annotations
@@ -668,6 +671,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--writing-profile", type=Path, metavar="PATH",
                         help="writing criteria for the exposition review")
     parser.add_argument("--writing-profile-exclude", action="append", default=[], metavar="PATTERN")
+    parser.add_argument("--no-writing-profile", action="store_true",
+                        help="review the exposition without a writing profile, even if "
+                        "loose-ends.toml names one")
+    parser.add_argument("--default-writing-profile", type=Path, metavar="PATH",
+                        help="the profile to use when neither --writing-profile nor "
+                        "loose-ends.toml names one (the workbench passes your personal default)")
+    parser.add_argument("--default-writing-profile-exclude", action="append", default=[],
+                        metavar="PATTERN", help="exclusions for --default-writing-profile")
     parser.add_argument("--context", action="append", type=Path, default=[], metavar="PATH",
                         help="notes or results the mathematical reviewer may use; repeatable; "
                         "replaces the manuscript's context from loose-ends.toml")
@@ -730,10 +741,18 @@ def main(argv: list[str] | None = None) -> int:
             else entry.with_suffix(".pdf")
         )
         audience = args.audience or settings["audience"] or write_paper.DEFAULT_AUDIENCE
-        profile_source = (
-            args.writing_profile.expanduser() if args.writing_profile
-            else repository / settings["writing_profile"] if settings["writing_profile"]
-            else None
+        # An explicit profile, else the project's, else the personal default.
+        if args.no_writing_profile and args.writing_profile:
+            raise common.CodexError("--writing-profile and --no-writing-profile exclude each other")
+        profile_source, profile_exclude = (
+            (None, []) if args.no_writing_profile
+            else (args.writing_profile.expanduser(), args.writing_profile_exclude)
+            if args.writing_profile
+            else (repository / settings["writing_profile"], args.writing_profile_exclude)
+            if settings["writing_profile"]
+            else (args.default_writing_profile.expanduser(), args.default_writing_profile_exclude)
+            if args.default_writing_profile
+            else (None, [])
         )
         # --context replaces the manuscript's context from loose-ends.toml.
         context = (
@@ -781,7 +800,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    note: {message}")
         if "exposition" in kinds and profile_source is not None:
             origin = source_references.reference(profile_source)
-            print(f"  writing profile: {source_references.label(origin, str(profile_source))}")
+            print(f"  writing profile: {source_references.label(origin, str(profile_source))}"
+                  + (f" (leaving out {', '.join(profile_exclude)})" if profile_exclude else ""))
             for message in source_references.warnings("the writing profile", origin):
                 print(f"    note: {message}")
         if args.dry_run:
@@ -796,7 +816,7 @@ def main(argv: list[str] | None = None) -> int:
         profile = None
         if "exposition" in kinds and profile_source is not None:
             profile = write_paper.load_writing_profile(
-                profile_source, workspace, args.writing_profile_exclude
+                profile_source, workspace, profile_exclude
             )
         made = []
         for kind in kinds:

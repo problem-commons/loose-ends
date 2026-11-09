@@ -1578,10 +1578,13 @@ class WorkbenchApplication:
         labels: Iterable[Path] = (),
         label_command: Sequence[str] = (),
         projects: Sequence[workbench_projects.Project] = (),
+        writing_profile: workbench_projects.WritingProfileDefault | None = None,
     ):
         # Projects add their paper roots, manuscript roots, and labels; the
         # positional paths and --manuscripts keep working as before.
         self.projects = list(projects)
+        # The personal default profile for new manuscripts and exposition reviews.
+        self.writing_profile = writing_profile
         available = [project for project in self.projects if project.available]
         paths = list(dict.fromkeys([
             *paths, *(project.papers for project in available if project.papers),
@@ -1836,6 +1839,10 @@ class WorkbenchApplication:
             )
             self.label_thread.start()
 
+    def default_writing_profile(self) -> workbench_projects.WritingProfileDefault | None:
+        profile = getattr(self, "writing_profile", None)
+        return profile if profile is not None and profile.available else None
+
     def create_plan(self, request: dict) -> dict:
         plan = build_plan(
             request,
@@ -1846,6 +1853,7 @@ class WorkbenchApplication:
             paper_roots=self.paper_output_roots,
             manuscripts_for=self.manuscripts_for,
             repository_for=self.repository_for,
+            writing_profile=self.default_writing_profile(),
         )
         return self._save_plan(request, plan)
 
@@ -1859,6 +1867,7 @@ class WorkbenchApplication:
             paper_roots=self.paper_output_roots,
             manuscripts_for=self.manuscripts_for,
             repository_for=self.repository_for,
+            writing_profile=self.default_writing_profile(),
         )
         return self._save_plan(request, plan)
 
@@ -2522,6 +2531,10 @@ class WorkbenchHandler(BaseHTTPRequestHandler):
                                 project.record() for project in self.app.projects
                             ],
                             "taskDefaults": self.app.task_defaults,
+                            "writingProfile": (
+                                self.app.writing_profile.record()
+                                if self.app.writing_profile else None
+                            ),
                             "labelErrors": list(self.app.labels.errors),
                         },
                     }
@@ -3122,6 +3135,15 @@ def main(argv: list[str] | None = None) -> int:
     for project in projects:
         if not project.available:
             print(f"warning: project {project.name}: {project.status}", file=sys.stderr)
+    try:
+        writing_profile = (
+            workbench_projects.load_writing_profile(args.projects) if args.projects else None
+        )
+    except workbench_projects.ProjectError as exc:
+        return codex_cli.report_error(parser, exc)
+    if writing_profile is not None and not writing_profile.available:
+        print(f"warning: default writing profile not found: {writing_profile.path}",
+              file=sys.stderr)
     manuscripts = (
         args.manuscripts.expanduser().resolve()
         if args.manuscripts is not None
@@ -3142,6 +3164,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.label_command else ()
             ),
             projects=projects,
+            writing_profile=writing_profile,
         )
         app.start_watching()
         server = WorkbenchHTTPServer(
