@@ -19,6 +19,7 @@ import codex_cli
 import download_arxiv
 import open_problem_common as common
 import source_references
+import workbench_projects
 
 
 ACTIONS = {
@@ -465,22 +466,40 @@ def _review_arguments(argv: list[str], options: dict) -> None:
         argv.extend(("--review-web-search", mode))
 
 
-def _profile_arguments(argv: list[str], options: dict) -> str | None:
+def _profile_arguments(
+    argv: list[str],
+    options: dict,
+    default: workbench_projects.WritingProfileDefault | None = None,
+    *,
+    default_flags: tuple[str, str] = ("--writing-profile", "--writing-profile-exclude"),
+) -> str | None:
+    """The task's writing profile, else the personal default (unless declined).
+
+    Exclusions typed without a profile apply to the default profile and
+    replace its own exclusions. Returns the profile the task named, if any.
+    """
     profile = _text(options, "writingProfile")
-    if profile is not None:
-        path = Path(profile).expanduser()
-        if not path.exists():
-            raise PlanError(f"writing profile not found: {path}")
-        argv.extend(("--writing-profile", str(path.resolve())))
     patterns = options.get("writingProfileExclude") or []
     if isinstance(patterns, str):
         patterns = [line.strip() for line in patterns.splitlines() if line.strip()]
     if not isinstance(patterns, list) or not all(isinstance(item, str) for item in patterns):
         raise PlanError("profile exclusions must be glob patterns, one per line")
+    patterns = [pattern.strip() for pattern in patterns if pattern.strip()]
+    if profile is None and default is not None and options.get("noWritingProfile") is not True:
+        path_flag, exclude_flag = default_flags
+        argv.extend((path_flag, str(default.path)))
+        for pattern in patterns or default.exclude:
+            argv.extend((exclude_flag, pattern))
+        return None
+    if profile is not None:
+        path = Path(profile).expanduser()
+        if not path.exists():
+            raise PlanError(f"writing profile not found: {path}")
+        argv.extend(("--writing-profile", str(path.resolve())))
     if patterns and profile is None:
         raise PlanError("profile exclusions need a writing profile")
     for pattern in patterns:
-        argv.extend(("--writing-profile-exclude", pattern.strip()))
+        argv.extend(("--writing-profile-exclude", pattern))
     return profile
 
 
@@ -504,13 +523,24 @@ def _exposition_model_arguments(argv: list[str], options: dict) -> None:
         argv.extend(("--exposition-web-search", mode))
 
 
-def _writing_arguments(argv: list[str], options: dict, *, revise: bool) -> None:
-    """Writing profile, audience, and the manuscript-only exposition reviewer."""
-    profile = _profile_arguments(argv, options)
+def _writing_arguments(
+    argv: list[str],
+    options: dict,
+    *,
+    revise: bool,
+    default: workbench_projects.WritingProfileDefault | None = None,
+) -> None:
+    """Writing profile, audience, and the manuscript-only exposition reviewer.
+
+    A new manuscript uses the personal default profile when the task names
+    none; a revision keeps its inherited profile instead.
+    """
+    profile = _profile_arguments(argv, options, None if revise else default)
     if options.get("noWritingProfile") is True:
-        if not revise or profile is not None:
-            raise PlanError("drop the inherited profile only in a revision without a new one")
-        argv.append("--no-writing-profile")
+        if profile is not None:
+            raise PlanError("give a writing profile or write without one, not both")
+        if revise:
+            argv.append("--no-writing-profile")
     if value := _text(options, "audience"):
         argv.extend(("--audience", value))
     exposition = options.get("expositionReview")
@@ -590,8 +620,12 @@ def build_plan(
     paper_roots: Iterable[Path] | None = None,
     manuscripts_for: Callable[[Path], Path | None] | None = None,
     repository_for: Callable[[Path], Path | None] | None = None,
+    writing_profile: workbench_projects.WritingProfileDefault | None = None,
 ) -> dict:
     """Plan a task; `manuscripts_for` maps a target to its project's manuscripts.
+
+    `writing_profile` is the personal default for new manuscripts and
+    exposition reviews that name no profile.
 
     A manuscript task writes into exactly one project: its targets must all
     belong to the same project (or to none, which uses `manuscripts`).
@@ -907,7 +941,7 @@ def build_plan(
             argv.extend(("--author", author.strip()))
         _common_arguments(argv, options, web_search=True)
         _review_arguments(argv, options)
-        _writing_arguments(argv, options, revise=False)
+        _writing_arguments(argv, options, revise=False, default=writing_profile)
         units.append(
             _unit(
                 label=f"Write one manuscript from {len(targets)} selection(s)",
@@ -991,7 +1025,15 @@ def build_plan(
             if kind in ("both", "exposition"):
                 if value := _text(options, "expositionPrompt"):
                     argv.extend(("--exposition-prompt", value))
-                _profile_arguments(argv, options)
+                # The project's loose-ends.toml profile outranks the personal default.
+                named = _profile_arguments(
+                    argv, options, writing_profile,
+                    default_flags=("--default-writing-profile", "--default-writing-profile-exclude"),
+                )
+                if options.get("noWritingProfile") is True:
+                    if named is not None:
+                        raise PlanError("give a writing profile or review without one, not both")
+                    argv.append("--no-writing-profile")
                 if value := _text(options, "audience"):
                     argv.extend(("--audience", value))
             if kind != "check":

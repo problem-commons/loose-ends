@@ -1270,7 +1270,9 @@ python src/review_manuscript.py ~/papers/spanners/socg/main.tex --status
 lists the manuscript's reviews and whether each is current or which reviewed
 files changed since. Audience, writing profile, build command and PDF default
 to the manuscript's entry in the repository's `loose-ends.toml` (see
-[Several projects in one workbench](#several-projects-in-one-workbench)). A
+[Several projects in one workbench](#several-projects-in-one-workbench)).
+Without a profile there, `--default-writing-profile` (your personal default,
+passed by the workbench) applies; `--no-writing-profile` reviews without one. A
 review proposes; it changes nothing in the manuscript.
 
 To see what Loose Ends makes of your folders before a first run:
@@ -1431,6 +1433,19 @@ shows its project, and a Project filter appears when there is more than one.
 A missing checkout is reported and skipped. Positional paper directories,
 `--manuscripts`, `--labels` and `--label-command` work as before and can be
 combined with `--projects`.
+
+The projects file may also name your default writing profile:
+
+```toml
+[writing_profile]
+path = "~/writing-profiles/computational-geometry-writing"
+exclude = ["references/evaluation.md", "agents/*"]   # background, not criteria
+```
+
+New manuscripts (Write) and exposition reviews use it when the dialog names no
+profile and, for a paper repository, its `loose-ends.toml` names none either;
+the dialog says what a blank field means and offers to go without a profile.
+Revisions keep their inherited profile.
 
 A paper repository may describe itself for everyone who uses it in
 `loose-ends.toml` at its root (shared, so without machine-specific paths):

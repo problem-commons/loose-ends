@@ -20,6 +20,13 @@ and is never shared. TOML or JSON, version 1:
     kind = "paper"
     path = "~/papers/1d-oriented-spanners"
 
+A personal default writing profile, used where neither the task nor the
+project's loose-ends.toml names one (see `load_writing_profile`):
+
+    [writing_profile]
+    path = "~/writing-profiles/computational-geometry-writing"
+    exclude = ["references/evaluation.md", "agents/*"]
+
 Relative paths are relative to the projects file. `pool` and `papers`
 projects have a Loose Ends paper root; `pool` only marks that pool tooling
 manages it. A `paper` project is an ordinary repository of manuscripts in its
@@ -355,6 +362,54 @@ def load_projects(path: Path) -> list[Project]:
             raise ProjectError(f"{path}: two projects are named {project.name!r}")
         seen.add(project.name)
     return projects
+
+
+@dataclass(frozen=True)
+class WritingProfileDefault:
+    """The personal default writing profile named in a projects file."""
+
+    path: Path
+    exclude: tuple[str, ...] = ()
+
+    @property
+    def available(self) -> bool:
+        return self.path.exists()
+
+    def record(self) -> dict:
+        return {
+            "path": str(self.path),
+            "name": self.path.name,
+            "exclude": list(self.exclude),
+            "available": self.available,
+        }
+
+
+def load_writing_profile(path: Path) -> WritingProfileDefault | None:
+    """The projects file's default writing profile, if it names one.
+
+    `writing_profile` is a path or a table with `path` and `exclude` (glob
+    patterns relative to the profile). New manuscripts and exposition reviews
+    use it when the task gives no profile and the project's loose-ends.toml
+    names none; revisions keep their inherited profile.
+    """
+    path = path.expanduser().resolve()
+    value = _load_document(path).get("writing_profile")
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = {"path": value}
+    if not isinstance(value, dict):
+        raise ProjectError(f"{path}: writing_profile must be a path or a table with path and exclude")
+    unknown = set(value) - {"path", "exclude"}
+    if unknown:
+        raise ProjectError(f"{path}: writing_profile has unknown keys: {', '.join(sorted(unknown))}")
+    exclude = value.get("exclude", [])
+    if not isinstance(exclude, list) or not all(isinstance(item, str) and item.strip() for item in exclude):
+        raise ProjectError(f"{path}: writing_profile exclude must be a list of glob patterns")
+    return WritingProfileDefault(
+        _resolve(value.get("path"), path.parent, f"{path}: writing_profile path"),
+        tuple(item.strip() for item in exclude),
+    )
 
 
 def project_for(projects: Sequence[Project], path: Path | str) -> Project | None:

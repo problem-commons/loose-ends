@@ -3975,7 +3975,48 @@ function renderRepositoryManuscript(item) {
   main.replaceChildren(shell);
 }
 
-function manuscriptReviewSettings(options) {
+// What a blank writing-profile field means for a task: the project's shared
+// profile (loose-ends.toml), else your default from the workbench settings.
+function blankProfileMeaning(task) {
+  if (task?.action === "manuscript-review") {
+    const item = repositoryManuscripts().find(value =>
+      (task.targets || []).some(target => target.path === value.manuscript.entryPath));
+    if (item?.project.writingProfile) {
+      return { kind: "project", name: item.project.writingProfile };
+    }
+  }
+  const personal = state.settings.writingProfile;
+  if (personal?.available) return { kind: "personal", ...personal };
+  return null;
+}
+
+function profileFields(grid, options, meaning, { label = "Writing profile", without, help }) {
+  const personal = meaning?.kind === "personal";
+  grid.append(field("writingProfile", label, {
+    value: options.writingProfile || "", full: true,
+    placeholder: personal ? `Blank: ${meaning.path}`
+      : meaning?.kind === "project" ? `Blank: ${meaning.name} (loose-ends.toml)`
+      : "e.g. ~/writing-profiles/my-profile",
+    help: personal
+      ? `Blank: your default profile ${meaning.name} from the workbench settings.${help ? ` ${help}` : ""}`
+      : meaning?.kind === "project"
+        ? `Blank: the project's profile ${meaning.name} from loose-ends.toml.${help ? ` ${help}` : ""}`
+        : help || "",
+  }));
+  grid.append(field("writingProfileExclude", "Leave out of the profile", {
+    type: "textarea", value: Array.isArray(options.writingProfileExclude) ? options.writingProfileExclude.join("\n") : options.writingProfileExclude || "",
+    placeholder: personal && meaning.exclude.length ? `Blank: ${meaning.exclude.join(", ")}` : "e.g. references/evaluation.md",
+    full: true,
+    help: personal && meaning.exclude.length
+      ? "Glob patterns relative to the profile, one per line. Blank leaves out the default's files listed above; anything here replaces them."
+      : "Glob patterns relative to the profile, one per line, for background files that are not writing instructions.",
+  }));
+  if (meaning && without) {
+    grid.append(checkbox("noWritingProfile", without, "", options.noWritingProfile === true));
+  }
+}
+
+function manuscriptReviewSettings(options, task = state.dialog) {
   const kind = options.reviewKind || "both";
   const section = node("section", "model-settings writing-settings");
   section.append(node("h3", "", "Manuscript review"));
@@ -3997,13 +4038,13 @@ function manuscriptReviewSettings(options) {
     help: "The reviewers get the files the build read, plus the PDF.",
   }));
   grid.append(field("buildCommand", "Build command", {
-    value: options.buildCommand || "", placeholder: "make paper",
+    value: options.buildCommand || "", placeholder: "e.g. make paper",
     help: "With the project build: runs next to the entry file. Leave blank to use loose-ends.toml.",
   }));
   if (["both", "math"].includes(kind)) {
     grid.append(field("contextPaths", "Context for the mathematical reviewer", {
       type: "textarea", value: options.contextPaths || "", full: true,
-      placeholder: "~/problem-commons/pool/papers/own/…/OP-001/attempt-002",
+      placeholder: "e.g. ~/problem-commons/pool/papers/own/…/OP-001/attempt-002",
       help: "Files or directories, one per line: research notes or attempts the reviewer checks the manuscript against. Blank: the manuscript's context from loose-ends.toml; anything here replaces it. The exposition reader never sees them.",
     }));
   }
@@ -4015,15 +4056,10 @@ function manuscriptReviewSettings(options) {
       value: options.audience || "", full: true,
       help: "Intended readers. Default: loose-ends.toml, else researchers in the field who have not read the cited papers.",
     }));
-    grid.append(field("writingProfile", "Writing profile", {
-      value: options.writingProfile || "", full: true,
-      placeholder: "~/writing/computational-geometry-writing",
-      help: "Writing criteria for the reader. Default: loose-ends.toml. Only its digest is recorded in the repository.",
-    }));
-    grid.append(field("writingProfileExclude", "Leave out of the profile", {
-      type: "textarea", value: Array.isArray(options.writingProfileExclude) ? options.writingProfileExclude.join("\n") : options.writingProfileExclude || "",
-      placeholder: "references/evaluation.md", full: true,
-    }));
+    profileFields(grid, options, blankProfileMeaning(task), {
+      without: "Review without a writing profile",
+      help: "Writing criteria for the reader; only their digest is recorded in the repository.",
+    });
     grid.append(field("expositionAgent", "Reader agent", {
       type: "select", value: options.expositionAgent || "",
       options: [["", kind === "both" ? "Inherit the mathematical reviewer's" : "Inherit the agent below"], ["codex", "Codex"], ["claude", "Claude Code (needs Linux/WSL2)"]],
@@ -5668,7 +5704,7 @@ function renderTaskConfiguration(errorMessage = "") {
     grid.append(writingSettings(task, options, draftRecord(task.targets[0]?.path)));
   }
   if (task.action === "manuscript-review") {
-    grid.append(manuscriptReviewSettings(options));
+    grid.append(manuscriptReviewSettings(options, task));
     grid.querySelector('[name="reviewKind"]').addEventListener("change", () => {
       saveDialogOptions();
       renderTaskConfiguration();
@@ -5754,22 +5790,25 @@ function writingSettings(task, options, inherited) {
   const grid = node("div", "form-grid");
   const profile = inherited?.writingProfile;
   const inheritedProfile = profile ? `${profile.name} (${profile.digest})` : "none";
-  grid.append(field("writingProfile", inherited ? "New writing profile" : "Writing profile", {
-    value: options.writingProfile || "", full: true,
-    placeholder: "~/writing/computational-geometry-writing",
-    help: inherited
-      ? `Inherited: ${inheritedProfile}. Leave blank to keep it; a path stores and uses a new version.`
-      : "Optional: a file or directory of writing criteria, e.g. a skill folder. Its text files are copied into the manuscript and given to the writer, the critic, and the reader.",
-  }));
-  grid.append(field("writingProfileExclude", "Leave out of the profile", {
-    type: "textarea", value: Array.isArray(options.writingProfileExclude) ? options.writingProfileExclude.join("\n") : options.writingProfileExclude || "",
-    placeholder: "references/evaluation.md", full: true,
-    help: inherited
-      ? "With a new profile only: glob patterns relative to it, one per line, for background files that are not writing instructions."
-      : "Glob patterns relative to the profile, one per line, for background files that are not writing instructions.",
-  }));
-  if (inherited && profile) {
-    grid.append(checkbox("noWritingProfile", "Revise without the inherited profile", "", options.noWritingProfile === true));
+  if (inherited) {
+    grid.append(field("writingProfile", "New writing profile", {
+      value: options.writingProfile || "", full: true,
+      placeholder: "e.g. ~/writing-profiles/my-profile",
+      help: `Inherited: ${inheritedProfile}. Leave blank to keep it; a path stores and uses a new version.`,
+    }));
+    grid.append(field("writingProfileExclude", "Leave out of the profile", {
+      type: "textarea", value: Array.isArray(options.writingProfileExclude) ? options.writingProfileExclude.join("\n") : options.writingProfileExclude || "",
+      placeholder: "e.g. references/evaluation.md", full: true,
+      help: "With a new profile only: glob patterns relative to it, one per line, for background files that are not writing instructions.",
+    }));
+    if (profile) {
+      grid.append(checkbox("noWritingProfile", "Revise without the inherited profile", "", options.noWritingProfile === true));
+    }
+  } else {
+    profileFields(grid, options, blankProfileMeaning(task), {
+      without: "Write without a writing profile",
+      help: "A file or directory of writing criteria, e.g. a skill folder. Its text files are copied into the manuscript and given to the writer, the critic, and the reader.",
+    });
   }
   grid.append(field("audience", inherited ? "Override audience" : "Audience", {
     value: options.audience || "", full: true,

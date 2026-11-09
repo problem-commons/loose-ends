@@ -312,6 +312,74 @@ pdf = "journal/build/paper.pdf"
         with self.assertRaisesRegex(PlanError, "outside the configured roots"):
             app.create_plan({"action": "manuscript-review", "targets": [{"path": str(outside)}]})
 
+    def test_personal_default_writing_profile(self):
+        profile = self.root / "profiles" / "cg"
+        (profile / "references").mkdir(parents=True)
+        (profile / "SKILL.md").write_text("# Writing\n", encoding="utf-8")
+        path = self.projects_file(
+            '\n[writing_profile]\npath = "../profiles/cg"\n'
+            'exclude = ["references/evaluation.md", "agents/*"]\n'
+        )
+        default = projects.load_writing_profile(path)
+        self.assertEqual((default.path, default.exclude, default.available),
+                         (profile, ("references/evaluation.md", "agents/*"), True))
+        self.assertEqual(default.record()["name"], "cg")
+        self.assertIsNone(projects.load_writing_profile(self.projects_file()))
+        bad = self.root / "config" / "bad.toml"
+        bad.write_text('schema_version = 1\nwriting_profile = {path = "x", exclude = "agents/*"}\n',
+                       encoding="utf-8")
+        with self.assertRaisesRegex(projects.ProjectError, "exclude must be a list"):
+            projects.load_writing_profile(bad)
+
+        app = workbench.WorkbenchApplication(
+            paths=[], manuscripts=None, state_directory=self.root / "state",
+            projects=projects.load_projects(path), writing_profile=default,
+        )
+        self.addCleanup(app.close)
+        entry = self.repository / "socg" / "main.tex"
+
+        def review(**options):
+            plan = app.create_plan({
+                "action": "manuscript-review", "targets": [{"kind": "latex", "path": str(entry)}],
+                "options": {"buildMode": "none", **options},
+            })
+            return plan["units"][0]["argv"]
+
+        # A blank field: the default goes to the script, which prefers loose-ends.toml.
+        argv = review(reviewKind="exposition")
+        self.assertEqual(argv[argv.index("--default-writing-profile") + 1], str(profile))
+        self.assertEqual([argv[i + 1] for i, value in enumerate(argv)
+                          if value == "--default-writing-profile-exclude"],
+                         ["references/evaluation.md", "agents/*"])
+        self.assertNotIn("--writing-profile", argv)
+        # Exclusions typed without a path replace the default's.
+        argv = review(reviewKind="both", writingProfileExclude="agents/*")
+        self.assertEqual(argv.count("--default-writing-profile-exclude"), 1)
+        # An explicit profile wins; declining reviews without one.
+        argv = review(reviewKind="exposition", writingProfile=str(profile / "SKILL.md"))
+        self.assertIn("--writing-profile", argv)
+        self.assertNotIn("--default-writing-profile", argv)
+        argv = review(reviewKind="exposition", noWritingProfile=True)
+        self.assertIn("--no-writing-profile", argv)
+        self.assertNotIn("--default-writing-profile", argv)
+        self.assertNotIn("--default-writing-profile", review(reviewKind="math"))
+        with self.assertRaisesRegex(PlanError, "not both"):
+            review(reviewKind="exposition", writingProfile=str(profile), noWritingProfile=True)
+
+        # New manuscripts use the default; a missing profile is not offered.
+        pool, paper = self.pools["pool-a"]
+        plan = app.create_plan({"action": "write", "targets": [{"kind": "paper", "path": str(paper)}],
+                                "options": {}})
+        argv = plan["units"][0]["argv"]
+        self.assertEqual(argv[argv.index("--writing-profile") + 1], str(profile))
+        plan = app.create_plan({"action": "write", "targets": [{"kind": "paper", "path": str(paper)}],
+                                "options": {"noWritingProfile": True}})
+        self.assertNotIn("--writing-profile", plan["units"][0]["argv"])
+        app.writing_profile = projects.WritingProfileDefault(self.root / "missing")
+        plan = app.create_plan({"action": "write", "targets": [{"kind": "paper", "path": str(paper)}],
+                                "options": {}})
+        self.assertNotIn("--writing-profile", plan["units"][0]["argv"])
+
 
 if __name__ == "__main__":
     unittest.main()
